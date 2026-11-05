@@ -11,6 +11,7 @@ import * as bcrypt from 'bcryptjs';
 import { PrismaService } from '../database/prisma.service.js';
 import type { LoginDto } from './dto/login.dto.js';
 import type { RegisterDto } from './dto/register.dto.js';
+import { ensureTrialSubscription } from '../landlord/trial-subscription.js';
 
 interface RefreshTokenClaims {
   sub: string;
@@ -56,7 +57,7 @@ export class AuthService {
             passwordHash,
           },
         });
-        await transaction.organisation.create({
+        const organisation = await transaction.organisation.create({
           data: {
             name: input.organisationName.trim(),
             type: input.organisationType,
@@ -70,7 +71,9 @@ export class AuthService {
               },
             },
           },
+          select: { id: true },
         });
+        await ensureTrialSubscription(transaction, organisation.id);
         return createdUser;
       });
 

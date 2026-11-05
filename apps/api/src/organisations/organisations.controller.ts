@@ -12,6 +12,7 @@ import { JwtAccessGuard } from '../auth/jwt-access.guard.js';
 import type { AccessTokenClaims } from '../auth/auth.types.js';
 import { PrismaService } from '../database/prisma.service.js';
 import { CreateOrganisationDto } from './dto/create-organisation.dto.js';
+import { ensureTrialSubscription } from '../landlord/trial-subscription.js';
 
 @Controller('organisations')
 @UseGuards(JwtAccessGuard)
@@ -40,6 +41,22 @@ export class OrganisationsController {
       orderBy: { joinedAt: 'asc' },
     });
     return { organisations: memberships };
+  }
+
+  @Get('invitations')
+  async invitations(@CurrentUser() user: AccessTokenClaims) {
+    const memberships = await this.prisma.organisationMember.findMany({
+      where: { userId: user.sub, status: MembershipStatus.INVITED },
+      select: {
+        role: true,
+        invitedAt: true,
+        organisation: {
+          select: { id: true, name: true, type: true, country: true, currency: true },
+        },
+      },
+      orderBy: { invitedAt: 'asc' },
+    });
+    return { invitations: memberships };
   }
 
   @Post()
@@ -71,6 +88,7 @@ export class OrganisationsController {
           currency: true,
         },
       });
+      await ensureTrialSubscription(transaction, created.id);
       await transaction.auditLog.create({
         data: {
           organisationId: created.id,

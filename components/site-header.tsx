@@ -53,6 +53,10 @@ export function SiteHeader() {
   const [open, setOpen] = useState(false);
   const [scrolled, setScrolled] = useState(pathname !== "/");
 
+  if (pathname.startsWith("/dashboard")) {
+    return null;
+  }
+
   useEffect(() => {
     const updateHeader = () => {
       setScrolled(pathname !== "/" || window.scrollY > 0);

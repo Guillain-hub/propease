@@ -320,17 +320,18 @@ model OrganisationMember {
 }
 
 model Plan {
-  id            String         @id @default(uuid()) @db.Uuid
-  slug          String         @unique @db.VarChar(80)
-  name          String         @db.VarChar(120)
-  monthlyPrice  Decimal        @map("monthly_price") @db.Decimal(12, 2)
-  annualPrice   Decimal        @map("annual_price") @db.Decimal(12, 2)
-  unitLimit     Int?           @map("unit_limit")
-  features      Json           @default("{}")
-  isActive      Boolean        @default(true) @map("is_active")
-  createdAt     DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt     DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
+  id            String                @id @default(uuid()) @db.Uuid
+  slug          String                @unique @db.VarChar(80)
+  name          String                @db.VarChar(120)
+  monthlyPrice  Decimal               @map("monthly_price") @db.Decimal(12, 2)
+  annualPrice   Decimal               @map("annual_price") @db.Decimal(12, 2)
+  unitLimit     Int?                  @map("unit_limit")
+  features      Json                  @default("{}")
+  isActive      Boolean               @default(true) @map("is_active")
+  createdAt     DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime              @updatedAt @map("updated_at") @db.Timestamptz(6)
   subscriptions Subscription[]
+  invoices      SubscriptionInvoice[] @relation("InvoicePlan")
 
   @@map("plans")
 }
@@ -356,6 +357,8 @@ model Subscription {
 model SubscriptionInvoice {
   id             String                @id @default(uuid()) @db.Uuid
   subscriptionId String                @map("subscription_id") @db.Uuid
+  planId         String?               @map("plan_id") @db.Uuid
+  billingCycle   BillingCycle?         @map("billing_cycle")
   invoiceNumber  String                @map("invoice_number") @db.VarChar(80)
   amount         Decimal               @db.Decimal(12, 2)
   dueDate        DateTime              @map("due_date") @db.Date
@@ -363,6 +366,7 @@ model SubscriptionInvoice {
   status         InvoiceStatus         @default(OPEN)
   createdAt      DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
   subscription   Subscription          @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  plan           Plan?                 @relation("InvoicePlan", fields: [planId], references: [id], onDelete: Restrict)
   payments       SubscriptionPayment[]
 
   @@unique([subscriptionId, invoiceNumber])
@@ -377,9 +381,11 @@ model SubscriptionPayment {
   reference          String?             @db.VarChar(160)
   amount             Decimal             @db.Decimal(12, 2)
   verificationStatus VerificationStatus  @default(PENDING) @map("verification_status")
+  proofFileId        String?             @map("proof_file_id") @db.Uuid
   receivedAt         DateTime?           @map("received_at") @db.Timestamptz(6)
   createdAt          DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
   invoice            SubscriptionInvoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  proofFile          StoredFile?         @relation("SubscriptionPaymentProof", fields: [proofFileId], references: [id], onDelete: SetNull)
 
   @@index([invoiceId, verificationStatus])
   @@map("subscription_payments")
@@ -392,6 +398,7 @@ model Property {
   name           String         @db.VarChar(180)
   type           PropertyType
   address        String         @db.VarChar(500)
+  description    String?        @db.Text
   status         PropertyStatus @default(ACTIVE)
   createdAt      DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt      DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
@@ -411,6 +418,10 @@ model Unit {
   propertyId          String               @map("property_id") @db.Uuid
   unitNumber          String               @map("unit_number") @db.VarChar(80)
   floor               String?              @db.VarChar(40)
+  bedrooms            Int?
+  bathrooms           Int?
+  sizeSqm             Decimal?             @map("size_sqm") @db.Decimal(10, 2)
+  utilityArrangement  String?              @map("utility_arrangement") @db.VarChar(120)
   rentAmount          Decimal              @map("rent_amount") @db.Decimal(12, 2)
   depositAmount       Decimal              @map("deposit_amount") @db.Decimal(12, 2)
   status              UnitStatus           @default(AVAILABLE)
@@ -428,19 +439,21 @@ model Unit {
 }
 
 model Tenant {
-  id                  String               @id @default(uuid()) @db.Uuid
-  organisationId      String               @map("organisation_id") @db.Uuid
-  userId              String?              @unique @map("user_id") @db.Uuid
-  legalName           String               @map("legal_name") @db.VarChar(180)
-  phone               String?              @db.VarChar(32)
-  email               String?              @db.VarChar(320)
-  createdAt           DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt           DateTime             @updatedAt @map("updated_at") @db.Timestamptz(6)
-  organisation        Organisation         @relation(fields: [organisationId], references: [id], onDelete: Cascade)
-  user                User?                @relation("TenantUser", fields: [userId], references: [id], onDelete: SetNull)
-  tenancies           Tenancy[]
-  payments            Payment[]
-  maintenanceRequests MaintenanceRequest[]
+  id                    String               @id @default(uuid()) @db.Uuid
+  organisationId        String               @map("organisation_id") @db.Uuid
+  userId                String?              @unique @map("user_id") @db.Uuid
+  legalName             String               @map("legal_name") @db.VarChar(180)
+  phone                 String?              @db.VarChar(32)
+  email                 String?              @db.VarChar(320)
+  emergencyContactName  String?              @map("emergency_contact_name") @db.VarChar(180)
+  emergencyContactPhone String?              @map("emergency_contact_phone") @db.VarChar(32)
+  createdAt             DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt             DateTime             @updatedAt @map("updated_at") @db.Timestamptz(6)
+  organisation          Organisation         @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+  user                  User?                @relation("TenantUser", fields: [userId], references: [id], onDelete: SetNull)
+  tenancies             Tenancy[]
+  payments              Payment[]
+  maintenanceRequests   MaintenanceRequest[]
 
   @@index([organisationId, legalName])
   @@index([organisationId, email])
@@ -470,17 +483,21 @@ model Tenancy {
 }
 
 model Lease {
-  id         String          @id @default(uuid()) @db.Uuid
-  tenancyId  String          @map("tenancy_id") @db.Uuid
-  startDate  DateTime        @map("start_date") @db.Date
-  endDate    DateTime        @map("end_date") @db.Date
-  rentAmount Decimal         @map("rent_amount") @db.Decimal(12, 2)
-  dueDay     Int             @map("due_day") @db.SmallInt
-  status     LeaseStatus     @default(DRAFT)
-  createdAt  DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt  DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
-  tenancy    Tenancy         @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
-  documents  LeaseDocument[]
+  id                String          @id @default(uuid()) @db.Uuid
+  tenancyId         String          @map("tenancy_id") @db.Uuid
+  startDate         DateTime        @map("start_date") @db.Date
+  endDate           DateTime        @map("end_date") @db.Date
+  rentAmount        Decimal         @map("rent_amount") @db.Decimal(12, 2)
+  dueDay            Int             @map("due_day") @db.SmallInt
+  terms             Json?
+  signedAt          DateTime?       @map("signed_at") @db.Timestamptz(6)
+  terminatedAt      DateTime?       @map("terminated_at") @db.Timestamptz(6)
+  terminationReason String?         @map("termination_reason") @db.VarChar(500)
+  status            LeaseStatus     @default(DRAFT)
+  createdAt         DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime        @updatedAt @map("updated_at") @db.Timestamptz(6)
+  tenancy           Tenancy         @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
+  documents         LeaseDocument[]
 
   @@index([tenancyId, status])
   @@index([endDate, status])
@@ -503,20 +520,22 @@ model LeaseDocument {
 }
 
 model Inspection {
-  id          String            @id @default(uuid()) @db.Uuid
-  unitId      String            @map("unit_id") @db.Uuid
-  tenancyId   String?           @map("tenancy_id") @db.Uuid
-  type        InspectionType
-  inspectorId String?           @map("inspector_id") @db.Uuid
-  inspectedAt DateTime?         @map("inspected_at") @db.Timestamptz(6)
-  status      InspectionStatus  @default(SCHEDULED)
-  createdAt   DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt   DateTime          @updatedAt @map("updated_at") @db.Timestamptz(6)
-  unit        Unit              @relation(fields: [unitId], references: [id], onDelete: Restrict)
-  tenancy     Tenancy?          @relation(fields: [tenancyId], references: [id], onDelete: SetNull)
-  inspector   User?             @relation("InspectionInspector", fields: [inspectorId], references: [id], onDelete: SetNull)
-  items       InspectionItem[]
-  media       InspectionMedia[]
+  id                   String            @id @default(uuid()) @db.Uuid
+  unitId               String            @map("unit_id") @db.Uuid
+  tenancyId            String?           @map("tenancy_id") @db.Uuid
+  type                 InspectionType
+  inspectorId          String?           @map("inspector_id") @db.Uuid
+  inspectedAt          DateTime?         @map("inspected_at") @db.Timestamptz(6)
+  status               InspectionStatus  @default(SCHEDULED)
+  tenantAcknowledgedAt DateTime?         @map("tenant_acknowledged_at") @db.Timestamptz(6)
+  estimatedRepairCost  Decimal?          @map("estimated_repair_cost") @db.Decimal(12, 2)
+  createdAt            DateTime          @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime          @updatedAt @map("updated_at") @db.Timestamptz(6)
+  unit                 Unit              @relation(fields: [unitId], references: [id], onDelete: Restrict)
+  tenancy              Tenancy?          @relation(fields: [tenancyId], references: [id], onDelete: SetNull)
+  inspector            User?             @relation("InspectionInspector", fields: [inspectorId], references: [id], onDelete: SetNull)
+  items                InspectionItem[]
+  media                InspectionMedia[]
 
   @@index([unitId, inspectedAt])
   @@index([tenancyId])
@@ -577,6 +596,9 @@ model Payment {
   method         PaymentMethod
   reference      String?             @db.VarChar(160)
   recordedBy     String?             @map("recorded_by") @db.Uuid
+  reversedAt     DateTime?           @map("reversed_at") @db.Timestamptz(6)
+  reversedBy     String?             @map("reversed_by") @db.Uuid
+  reversalReason String?             @map("reversal_reason") @db.VarChar(500)
   createdAt      DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
   organisation   Organisation        @relation(fields: [organisationId], references: [id], onDelete: Cascade)
   tenant         Tenant?             @relation(fields: [tenantId], references: [id], onDelete: SetNull)
@@ -641,6 +663,9 @@ model Expense {
   date           DateTime    @db.Date
   supplier       String?     @db.VarChar(180)
   evidenceFileId String?     @map("evidence_file_id") @db.Uuid
+  reversedAt     DateTime?   @map("reversed_at") @db.Timestamptz(6)
+  reversedBy     String?     @map("reversed_by") @db.Uuid
+  reversalReason String?     @map("reversal_reason") @db.VarChar(500)
   createdAt      DateTime    @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt      DateTime    @updatedAt @map("updated_at") @db.Timestamptz(6)
   property       Property    @relation(fields: [propertyId], references: [id], onDelete: Cascade)
@@ -657,6 +682,9 @@ model UtilityBill {
   period         String              @db.VarChar(7)
   totalAmount    Decimal             @map("total_amount") @db.Decimal(12, 2)
   evidenceFileId String?             @map("evidence_file_id") @db.Uuid
+  reversedAt     DateTime?           @map("reversed_at") @db.Timestamptz(6)
+  reversedBy     String?             @map("reversed_by") @db.Uuid
+  reversalReason String?             @map("reversal_reason") @db.VarChar(500)
   createdAt      DateTime            @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt      DateTime            @updatedAt @map("updated_at") @db.Timestamptz(6)
   property       Property            @relation(fields: [propertyId], references: [id], onDelete: Cascade)
@@ -684,18 +712,23 @@ model UtilityAllocation {
 }
 
 model MaintenanceRequest {
-  id          String               @id @default(uuid()) @db.Uuid
-  unitId      String               @map("unit_id") @db.Uuid
-  tenantId    String?              @map("tenant_id") @db.Uuid
-  category    String               @db.VarChar(100)
-  description String               @db.Text
-  priority    MaintenancePriority  @default(NORMAL)
-  status      MaintenanceStatus    @default(SUBMITTED)
-  createdAt   DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt   DateTime             @updatedAt @map("updated_at") @db.Timestamptz(6)
-  unit        Unit                 @relation(fields: [unitId], references: [id], onDelete: Restrict)
-  tenant      Tenant?              @relation(fields: [tenantId], references: [id], onDelete: SetNull)
-  expenses    MaintenanceExpense[]
+  id               String               @id @default(uuid()) @db.Uuid
+  unitId           String               @map("unit_id") @db.Uuid
+  tenantId         String?              @map("tenant_id") @db.Uuid
+  category         String               @db.VarChar(100)
+  description      String               @db.Text
+  priority         MaintenancePriority  @default(NORMAL)
+  status           MaintenanceStatus    @default(SUBMITTED)
+  assignedToUserId String?              @map("assigned_to_user_id") @db.Uuid
+  estimatedCost    Decimal?             @map("estimated_cost") @db.Decimal(12, 2)
+  actualCost       Decimal?             @map("actual_cost") @db.Decimal(12, 2)
+  completedAt      DateTime?            @map("completed_at") @db.Timestamptz(6)
+  resolutionNotes  String?              @map("resolution_notes") @db.Text
+  createdAt        DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime             @updatedAt @map("updated_at") @db.Timestamptz(6)
+  unit             Unit                 @relation(fields: [unitId], references: [id], onDelete: Restrict)
+  tenant           Tenant?              @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+  expenses         MaintenanceExpense[]
 
   @@index([unitId, status])
   @@index([tenantId, status])
@@ -723,6 +756,11 @@ model Notice {
   issueDate      DateTime       @map("issue_date") @db.Date
   effectiveDate  DateTime?      @map("effective_date") @db.Date
   deliveryStatus DeliveryStatus @default(DRAFT) @map("delivery_status")
+  issuerUserId   String?        @map("issuer_user_id") @db.Uuid
+  recipient      String?        @db.VarChar(320)
+  reason         String?        @db.VarChar(1000)
+  deliveryMethod String?        @map("delivery_method") @db.VarChar(80)
+  acknowledgedAt DateTime?      @map("acknowledged_at") @db.Timestamptz(6)
   createdAt      DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
   tenancy        Tenancy        @relation(fields: [tenancyId], references: [id], onDelete: Cascade)
 
@@ -751,21 +789,22 @@ model Notification {
 }
 
 model StoredFile {
-  id                   String               @id @default(uuid()) @db.Uuid
-  organisationId       String               @map("organisation_id") @db.Uuid
-  storageKey           String               @map("storage_key") @db.VarChar(1024)
-  fileName             String               @map("file_name") @db.VarChar(255)
-  mimeType             String               @map("mime_type") @db.VarChar(160)
-  sizeBytes            BigInt               @map("size_bytes")
-  accessClassification FileClassification   @default(PRIVATE) @map("access_classification")
-  uploadStatus         FileUploadStatus     @default(PENDING) @map("upload_status")
-  createdAt            DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
-  organisation         Organisation         @relation(fields: [organisationId], references: [id], onDelete: Cascade)
-  leaseDocuments       LeaseDocument[]      @relation("LeaseDocumentFile")
-  inspectionMedia      InspectionMedia[]    @relation("InspectionMediaFile")
-  expenseEvidence      Expense[]            @relation("ExpenseEvidence")
-  utilityEvidence      UtilityBill[]        @relation("UtilityEvidence")
-  maintenanceInvoices  MaintenanceExpense[] @relation("MaintenanceInvoice")
+  id                        String                @id @default(uuid()) @db.Uuid
+  organisationId            String                @map("organisation_id") @db.Uuid
+  storageKey                String                @map("storage_key") @db.VarChar(1024)
+  fileName                  String                @map("file_name") @db.VarChar(255)
+  mimeType                  String                @map("mime_type") @db.VarChar(160)
+  sizeBytes                 BigInt                @map("size_bytes")
+  accessClassification      FileClassification    @default(PRIVATE) @map("access_classification")
+  uploadStatus              FileUploadStatus      @default(PENDING) @map("upload_status")
+  createdAt                 DateTime              @default(now()) @map("created_at") @db.Timestamptz(6)
+  organisation              Organisation          @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+  leaseDocuments            LeaseDocument[]       @relation("LeaseDocumentFile")
+  inspectionMedia           InspectionMedia[]     @relation("InspectionMediaFile")
+  expenseEvidence           Expense[]             @relation("ExpenseEvidence")
+  utilityEvidence           UtilityBill[]         @relation("UtilityEvidence")
+  maintenanceInvoices       MaintenanceExpense[]  @relation("MaintenanceInvoice")
+  subscriptionPaymentProofs SubscriptionPayment[] @relation("SubscriptionPaymentProof")
 
   @@unique([organisationId, storageKey])
   @@index([organisationId, accessClassification])

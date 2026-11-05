@@ -11,12 +11,17 @@ import { Throttle } from '@nestjs/throttler';
 import { CurrentUser } from '../auth/current-user.decorator.js';
 import { JwtAccessGuard } from '../auth/jwt-access.guard.js';
 import type { AccessTokenClaims } from '../auth/auth.types.js';
+import { LandlordSubscriptionGuard } from '../landlord/landlord-subscription.guard.js';
 import { OrganisationAccessGuard } from '../organisations/organisation-access.guard.js';
 import { CreateUploadDto } from './dto/create-upload.dto.js';
 import { ObjectStorageService } from './object-storage.service.js';
 
 @Controller('organisations/:organisationId/files')
-@UseGuards(JwtAccessGuard, OrganisationAccessGuard)
+@UseGuards(
+  JwtAccessGuard,
+  OrganisationAccessGuard,
+  LandlordSubscriptionGuard,
+)
 export class FilesController {
   constructor(private readonly storage: ObjectStorageService) {}
 

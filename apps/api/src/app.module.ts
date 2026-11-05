@@ -14,6 +14,7 @@ import { FilesModule } from './files/files.module.js';
 import { NotificationsModule } from './notifications/notifications.module.js';
 import { DocumentsModule } from './documents/documents.module.js';
 import { RentChargesModule } from './rent-charges/rent-charges.module.js';
+import { LandlordModule } from './landlord/landlord.module.js';
 
 @Module({
   imports: [
@@ -62,6 +63,7 @@ import { RentChargesModule } from './rent-charges/rent-charges.module.js';
     NotificationsModule,
     DocumentsModule,
     RentChargesModule,
+    LandlordModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })
