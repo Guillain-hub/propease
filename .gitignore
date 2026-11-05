@@ -1,0 +1,9 @@
+node_modules
+.next
+.next-dev
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+apps/api/dist
+apps/api/coverage
