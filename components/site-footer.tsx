@@ -1,6 +1,9 @@
+"use client";
+
 import Link from "next/link";
 import { ArrowUpRight, Mail, MapPin, Phone } from "lucide-react";
 import { Brand } from "@/components/site-header";
+import { usePathname } from "next/navigation";
 
 const footerGroups = [
   {
@@ -24,6 +27,12 @@ const footerGroups = [
 ];
 
 export function SiteFooter() {
+  const pathname = usePathname();
+
+  if (pathname.startsWith("/dashboard")) {
+    return null;
+  }
+
   return (
     <footer className="site-footer">
       <div className="container">
