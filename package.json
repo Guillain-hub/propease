@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "dev:all": "concurrently --names web,api \"npm run dev\" \"npm run api:dev\"",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
@@ -26,6 +27,7 @@
     "@types/node": "^22.15.30",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.7",
+    "concurrently": "^10.0.6",
     "tailwindcss": "^4.1.12",
     "typescript": "^5.8.3"
   }

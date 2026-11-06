@@ -25,6 +25,8 @@ enum MembershipRole {
   OWNER
   ADMIN
   MANAGER
+  ACCOUNTANT
+  MAINTENANCE_STAFF
   STAFF
 
   @@map("membership_role")
@@ -271,6 +273,7 @@ model User {
   memberships                 OrganisationMember[]
   tenantProfile               Tenant?              @relation("TenantUser")
   propertyOwnerships          Property[]           @relation("PropertyOwner")
+  propertyAssignments         PropertyAssignment[]
   recordedPayments            Payment[]            @relation("PaymentRecorder")
   inspectionAssignments       Inspection[]         @relation("InspectionInspector")
   recordedDepositTransactions DepositTransaction[] @relation("DepositTransactionRecorder")
@@ -293,6 +296,7 @@ model Organisation {
   owner         User                 @relation("OrganisationOwner", fields: [ownerUserId], references: [id], onDelete: Restrict)
   members       OrganisationMember[]
   properties    Property[]
+  propertyOwners PropertyOwner[]
   tenants       Tenant[]
   subscription  Subscription?
   files         StoredFile[]
@@ -395,6 +399,7 @@ model Property {
   id             String         @id @default(uuid()) @db.Uuid
   organisationId String         @map("organisation_id") @db.Uuid
   ownerId        String?        @map("owner_id") @db.Uuid
+  propertyOwnerId String?       @map("property_owner_id") @db.Uuid
   name           String         @db.VarChar(180)
   type           PropertyType
   address        String         @db.VarChar(500)
@@ -404,13 +409,44 @@ model Property {
   updatedAt      DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
   organisation   Organisation   @relation(fields: [organisationId], references: [id], onDelete: Cascade)
   owner          User?          @relation("PropertyOwner", fields: [ownerId], references: [id], onDelete: SetNull)
+  propertyOwner  PropertyOwner? @relation(fields: [propertyOwnerId], references: [id], onDelete: Restrict)
+  assignments    PropertyAssignment[]
   units          Unit[]
   expenses       Expense[]
   utilityBills   UtilityBill[]
 
   @@index([organisationId, status])
   @@index([ownerId])
+  @@index([organisationId, propertyOwnerId])
   @@map("properties")
+}
+
+model PropertyOwner {
+  id             String       @id @default(uuid()) @db.Uuid
+  organisationId String       @map("organisation_id") @db.Uuid
+  name           String       @db.VarChar(180)
+  email          String?      @db.VarChar(320)
+  phone          String?      @db.VarChar(32)
+  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime     @updatedAt @map("updated_at") @db.Timestamptz(6)
+  organisation   Organisation @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+  properties     Property[]
+
+  @@unique([organisationId, email])
+  @@index([organisationId, name])
+  @@map("property_owners")
+}
+
+model PropertyAssignment {
+  propertyId String   @map("property_id") @db.Uuid
+  userId     String   @map("user_id") @db.Uuid
+  assignedAt DateTime @default(now()) @map("assigned_at") @db.Timestamptz(6)
+  property   Property @relation(fields: [propertyId], references: [id], onDelete: Cascade)
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([propertyId, userId])
+  @@index([userId])
+  @@map("property_assignments")
 }
 
 model Unit {

@@ -18,9 +18,11 @@ import {
   KeyRound,
   LayoutDashboard,
   Menu,
+  Plus,
   Search,
   Receipt,
   Settings,
+  Sparkles,
   Users,
   UsersRound,
   Wrench,
@@ -84,23 +86,7 @@ type OverviewData = {
     entityType: string;
     createdAt: string;
   }>;
-};
-type FinancialReport = {
-  period: { from: string; to: string };
-  rent: {
-    charged: string;
-    collected: string;
-    outstanding: string;
-    appliedToCharges: string;
-    unapplied: string;
-    paymentCount: number;
-  };
-  expenses: {
-    total: string;
-    propertyExpenses: string;
-    maintenanceExpenses: string;
-    count: number;
-  };
+  monthlyCollections: Array<{ month: string; collected: string }>;
 };
 type DashboardData = {
   user: User;
@@ -149,9 +135,15 @@ const navigation: { label: SectionName; icon: LucideIcon }[] = [
   { label: "Subscription", icon: CreditCard },
   { label: "Settings", icon: Settings },
 ];
-const primaryNavigation = navigation.slice(0, 11);
-const accountNavigation = navigation.slice(11);
-
+const sidebarNavigation: { label: SectionName; title: string; icon: LucideIcon }[] = [
+  { label: "Overview", title: "Overview", icon: LayoutDashboard },
+  { label: "Properties", title: "Properties", icon: Building2 },
+  { label: "Tenants", title: "Tenants", icon: Users },
+  { label: "Leases", title: "Leases", icon: FileText },
+  { label: "Rent & Deposits", title: "Rent records", icon: CircleDollarSign },
+  { label: "Inspections", title: "Inspections", icon: ClipboardCheck },
+  { label: "Maintenance", title: "Maintenance", icon: Wrench },
+];
 async function requestJson<T>(path: string): Promise<T> {
   const response = await fetch(`${apiBaseUrl}${path}`, {
     credentials: "include",
@@ -385,7 +377,9 @@ export default function DashboardPage() {
         ]);
         const membership = organisations[0] ?? null;
         const organisation = membership?.organisation ?? null;
-        const [properties, overview] = organisation
+        const role = membership?.role ?? "";
+        const loadPortfolioOverview = ["OWNER", "ADMIN", "MANAGER"].includes(role);
+        const [properties, overview] = organisation && loadPortfolioOverview
           ? await Promise.all([
               requestJson<{ properties: Property[] }>(
                 `/organisations/${organisation.id}/properties`,
@@ -397,6 +391,13 @@ export default function DashboardPage() {
           : [{ properties: [] }, null];
 
         if (active) {
+          setActiveSection(
+            role === "ACCOUNTANT"
+              ? "Reports"
+              : role === "MAINTENANCE_STAFF"
+                ? "Maintenance"
+                : "Overview",
+          );
           setData({
             user: currentUser.user,
             organisation,
@@ -486,6 +487,22 @@ export default function DashboardPage() {
     (total, property) => total + property._count.units,
     0,
   );
+  const visibleNavigation = navigation.filter(({ label }) => {
+    if (data.role === "ACCOUNTANT") {
+      return ["Rent & Deposits", "Expenses", "Utilities", "Reports"].includes(label);
+    }
+    if (data.role === "MAINTENANCE_STAFF") return label === "Maintenance";
+    if (data.role === "MANAGER") {
+      return !["Team", "Subscription", "Settings"].includes(label);
+    }
+    return data.role === "OWNER" || data.role === "ADMIN";
+  });
+  const visibleSidebarNavigation = sidebarNavigation.filter(({ label }) =>
+    visibleNavigation.some((item) => item.label === label),
+  );
+  const visibleAdditionalNavigation = visibleNavigation.filter(
+    ({ label }) => !visibleSidebarNavigation.some((item) => item.label === label),
+  );
 
   return (
     <div className="landlord-dashboard">
@@ -520,7 +537,7 @@ export default function DashboardPage() {
         </div>
         <div className="dashboard-sidebar-label">WORKSPACE</div>
         <nav className="landlord-navigation" aria-label="Workspace">
-          {primaryNavigation.map(({ label, icon: Icon }) => (
+          {visibleSidebarNavigation.map(({ label, title, icon: Icon }) => (
             <button
               className={`landlord-nav-item${activeSection === label ? " is-active" : ""}`}
               key={label}
@@ -531,41 +548,38 @@ export default function DashboardPage() {
               type="button"
               aria-current={activeSection === label ? "page" : undefined}
             >
-              <Icon size={17} strokeWidth={1.8} />
-              <span>{label}</span>
+              <Icon size={18} strokeWidth={1.8} />
+              <span>{title}</span>
             </button>
           ))}
-          <div className="dashboard-sidebar-label dashboard-sidebar-label-secondary">ACCOUNT</div>
-          {accountNavigation.map(({ label, icon: Icon }) => (
-            <button
-              className={`landlord-nav-item${activeSection === label ? " is-active" : ""}`}
-              key={label}
-              onClick={() => {
-                setActiveSection(label);
-                setMobileMenuOpen(false);
-              }}
-              type="button"
-              aria-current={activeSection === label ? "page" : undefined}
-            >
-              <Icon size={17} strokeWidth={1.8} />
-              <span>{label}</span>
-            </button>
-          ))}
+          <details className="dashboard-more-navigation">
+            <summary>
+              <ChevronDown size={16} aria-hidden="true" />
+              <span>More workspace</span>
+            </summary>
+            <div>
+              {visibleAdditionalNavigation.map(({ label, icon: Icon }) => (
+                <button
+                  className={`landlord-nav-item${activeSection === label ? " is-active" : ""}`}
+                  key={label}
+                  onClick={() => {
+                    setActiveSection(label);
+                    setMobileMenuOpen(false);
+                  }}
+                  type="button"
+                  aria-current={activeSection === label ? "page" : undefined}
+                >
+                  <Icon size={17} strokeWidth={1.8} />
+                  <span>{label}</span>
+                </button>
+              ))}
+            </div>
+          </details>
         </nav>
         <button className="dashboard-sidebar-help" type="button" onClick={() => router.push("/contact")}>
           <span>Need a hand?</span>
-          <b>Help centre <span aria-hidden="true">↗</span></b>
+          <b>Visit help centre <span aria-hidden="true">↗</span></b>
         </button>
-        <div className="dashboard-sidebar-user">
-          <span className="dashboard-user-avatar">
-            {data.user.name.slice(0, 1).toUpperCase()}
-          </span>
-          <span className="dashboard-user-details">
-            <b>{data.user.name}</b>
-            <small>{data.organisation?.name ?? "Landlord account"}</small>
-          </span>
-          <ChevronDown size={15} />
-        </div>
       </aside>
 
       <div className="landlord-main">
@@ -583,11 +597,13 @@ export default function DashboardPage() {
             <span aria-hidden="true">/</span>
             <b>{activeSection}</b>
           </div>
-          <DashboardSearch
-            organisationId={data.organisation?.id}
-            properties={data.properties}
-            onNavigate={(section) => setActiveSection(section)}
-          />
+          {["OWNER", "ADMIN", "MANAGER"].includes(data.role) && (
+            <DashboardSearch
+              organisationId={data.organisation?.id}
+              properties={data.properties}
+              onNavigate={(section) => setActiveSection(section)}
+            />
+          )}
           <div className="dashboard-topbar-actions">
             <div className="dashboard-popover-anchor">
               <button
@@ -644,6 +660,11 @@ export default function DashboardPage() {
               invitations={data.invitations}
               onAccepted={() => setRefreshKey((key) => key + 1)}
             />
+          ) : data.role === "STAFF" ? (
+            <section className="dashboard-error-card" role="status">
+              <h1>Workspace access needs an update</h1>
+              <p>Your legacy Staff role has been restricted. Ask an organisation owner or administrator to assign you a specific role.</p>
+            </section>
           ) : activeSection === "Overview" ? (
             <Overview
               data={data}
@@ -744,47 +765,43 @@ function Overview({
   }).format(new Date());
   const firstName = data.user.name.trim().split(/\s+/)[0];
   const summary = overview?.summary;
-  const currentMonth = new Date();
-  const [selectedMonth, setSelectedMonth] = useState(
-    `${currentMonth.getFullYear()}-${String(currentMonth.getMonth() + 1).padStart(2, "0")}`,
+  const now = new Date();
+  const year = now.getFullYear();
+  const monthIndex = now.getMonth();
+  const occupiedUnits = summary?.occupiedUnits ?? 0;
+  const totalUnits = summary?.units ?? unitCount;
+  const occupancyRate = totalUnits
+    ? Math.round((occupiedUnits / totalUnits) * 100)
+    : 0;
+  const currency = data.organisation?.currency ?? "RWF";
+  const money = (value: string | undefined) =>
+    `${new Intl.NumberFormat("en").format(Number(value ?? 0))} ${currency}`;
+  const compactMoney = (value: string | undefined) =>
+    `${currency} ${new Intl.NumberFormat("en", {
+      notation: "compact",
+      maximumFractionDigits: 1,
+    }).format(Number(value ?? 0))}`;
+  const collectedByMonth = new Map(
+    (overview?.monthlyCollections ?? []).map(({ month, collected }) => [
+      month,
+      Number(collected),
+    ]),
   );
-  const [monthReport, setMonthReport] = useState<FinancialReport | null>(null);
-  const [monthLoading, setMonthLoading] = useState(false);
-  const [monthError, setMonthError] = useState<string | null>(null);
-  useEffect(() => {
-    if (!data.organisation) return;
-    let active = true;
-    const [year, month] = selectedMonth.split("-").map(Number);
-    const from = `${selectedMonth}-01`;
-    const to = new Date(Date.UTC(year, month, 0)).toISOString().slice(0, 10);
-    setMonthLoading(true);
-    setMonthError(null);
-    void requestJson<FinancialReport>(
-      `/organisations/${data.organisation.id}/landlord/reports/financial?from=${from}&to=${to}`,
-    ).then((report) => {
-      if (active) setMonthReport(report);
-    }).catch((error: unknown) => {
-      if (active) setMonthError(error instanceof Error ? error.message : "Monthly report could not be loaded.");
-    }).finally(() => {
-      if (active) setMonthLoading(false);
-    });
-    return () => { active = false; };
-  }, [data.organisation, selectedMonth]);
-  const monthOptions = Array.from({ length: 12 }, (_, index) => {
-    const date = new Date(currentMonth.getFullYear(), currentMonth.getMonth() - index, 1);
+  const monthlyValues = Array.from({ length: 12 }, (_, index) => {
+    const value = new Date(year, index, 1);
+    const month = `${year}-${String(index + 1).padStart(2, "0")}`;
     return {
-      value: `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`,
-      label: new Intl.DateTimeFormat("en", { month: "long", year: "numeric" }).format(date),
+      month,
+      label: new Intl.DateTimeFormat("en", { month: "short" }).format(value),
+      amount: collectedByMonth.get(month) ?? 0,
     };
   });
-  const monthlyValues = [
-    { label: "Received", amount: Number(monthReport?.rent.collected ?? 0), color: "received" },
-    { label: "Charged", amount: Number(monthReport?.rent.charged ?? 0), color: "charged" },
-    { label: "Expenses", amount: Number(monthReport?.expenses.total ?? 0), color: "expenses" },
-  ];
-  const maxMonthlyAmount = Math.max(...monthlyValues.map(({ amount }) => amount), 0);
-  const money = (value: string | undefined) =>
-    `${new Intl.NumberFormat("en").format(Number(value ?? 0))} ${data.organisation?.currency ?? "RWF"}`;
+  const maxMonthlyAmount = Math.max(
+    ...monthlyValues.map(({ amount }) => amount),
+    0,
+  );
+  const recentActivity = overview?.recentActivity.slice(0, 3) ?? [];
+  const upcomingLeases = overview?.upcomingLeases.slice(0, 3) ?? [];
 
   return (
     <>
@@ -792,62 +809,38 @@ function Overview({
         <div>
           <span className="dashboard-date">{date.toUpperCase()}</span>
           <h1>
-            {getGreeting()}, {firstName}
+            {getGreeting()}, {firstName} <Sparkles size={16} aria-hidden="true" />
           </h1>
-          <p>Here&apos;s an overview of your property portfolio.</p>
+          <p>Here&apos;s what&apos;s happening with your properties.</p>
         </div>
         <button
           type="button"
           className="dashboard-primary-button"
           onClick={onOpenProperties}
         >
-          <Building2 size={16} />
-          View properties
+          <Plus size={16} />
+          Add property
         </button>
-        <div className="dashboard-hero-visual" aria-hidden="true">
-          <Image
-            src="/images/hero-modern-home.jpg"
-            alt=""
-            fill
-            priority
-            sizes="(max-width: 760px) 100vw, 42vw"
-          />
-          <span>Property portfolio</span>
-        </div>
       </div>
 
       <section className="dashboard-metrics" aria-label="Portfolio summary">
         <MetricCard
-          label="My properties"
-          value={String(summary?.properties ?? data.properties.length).padStart(2, "0")}
-          note={data.organisation?.name ?? "Your portfolio"}
-          icon={Building2}
-          tone="blue"
+          label="Properties"
+          value={String(summary?.properties ?? data.properties.length)}
+          note="In your portfolio"
           onClick={onOpenProperties}
         />
         <MetricCard
-          label="Units"
-          value={String(summary?.units ?? unitCount).padStart(2, "0")}
-          note={`${summary?.occupiedUnits ?? 0} occupied · ${summary?.availableUnits ?? 0} available`}
-          icon={LayoutDashboard}
-          tone="violet"
+          label="Units occupied"
+          value={`${occupancyRate}%`}
+          note={`${occupiedUnits} of ${totalUnits} units`}
           onClick={() => onOpenSection("Units")}
-        />
-        <MetricCard
-          label="Tenants"
-          value={String(summary?.tenants ?? 0).padStart(2, "0")}
-          note={`${summary?.activeTenancies ?? 0} active tenancies`}
-          icon={Users}
-          tone="green"
-          onClick={() => onOpenSection("Tenants")}
         />
         <MetricCard
           label="Rent to follow up"
           value={money(summary?.outstandingRent)}
-          note="Outstanding across rent charges"
-          icon={CircleDollarSign}
-          attention
-          tone="amber"
+          note={Number(summary?.outstandingRent ?? 0) > 0 ? "Needs attention" : "No rent outstanding"}
+          attention={Number(summary?.outstandingRent ?? 0) > 0}
           onClick={() => onOpenSection("Rent & Deposits")}
         />
       </section>
@@ -857,45 +850,37 @@ function Overview({
           <div className="dashboard-panel-heading">
             <div>
               <h2>Rent overview</h2>
-              <p>Rent collection across your properties</p>
+              <p>Collection records · {year}</p>
             </div>
-            <label className="dashboard-period-select">
-              <CalendarDays size={14} />
-              <span className="visually-hidden">Select report month</span>
-              <select value={selectedMonth} onChange={(event) => setSelectedMonth(event.currentTarget.value)}>
-                {monthOptions.map((month) => <option key={month.value} value={month.value}>{month.label}</option>)}
-              </select>
-              <ChevronDown size={14} aria-hidden="true" />
-            </label>
+            <span className="dashboard-year-label">This year <ChevronDown size={13} aria-hidden="true" /></span>
           </div>
-          {monthError ? (
-            <div className="dashboard-chart-message" role="status">{monthError}</div>
-          ) : monthLoading && !monthReport ? (
-            <div className="dashboard-chart-message" role="status">Loading monthly report…</div>
-          ) : maxMonthlyAmount === 0 ? (
-            <div className="dashboard-chart-empty">
-              <span className="dashboard-empty-icon"><CircleDollarSign size={20} /></span>
-              <b>No financial activity for this month</b>
-              <p>Rent received, charges and expenses will appear here when recorded.</p>
+          <div className="dashboard-rent-total">
+            <strong>{compactMoney(summary?.paymentsThisMonth)}</strong>
+            <small>recorded this month</small>
+          </div>
+          {maxMonthlyAmount === 0 ? (
+            <div className="dashboard-month-chart is-empty" role="status">
+              <span>No rent collected this year yet</span>
             </div>
           ) : (
-            <div className="dashboard-month-chart" aria-label="Monthly financial overview">
-              {monthlyValues.map(({ label, amount, color }) => (
-                <div className="dashboard-chart-column" key={label}>
-                  <div className="dashboard-chart-track">
-                    <span className={`dashboard-chart-bar is-${color}`} style={{ height: `${Math.max(amount === 0 ? 0 : 8, Math.round((amount / maxMonthlyAmount) * 100))}%` }} />
+            <div className="dashboard-month-chart" aria-label={`Rent collected by month in ${year}`}>
+              {monthlyValues.map(({ month, label, amount }, index) => {
+                const barHeight = amount
+                  ? Math.max(8, Math.round((amount / maxMonthlyAmount) * 100))
+                  : 0;
+                return (
+                  <div className="dashboard-chart-column" key={month}>
+                    <div className="dashboard-chart-track">
+                      <span
+                        className={`dashboard-chart-bar${index === monthIndex ? " is-current" : ""}`}
+                        style={{ height: `${barHeight}%` }}
+                        title={`${label}: ${money(String(amount))}`}
+                      />
+                    </div>
+                    <small>{index % 2 === 0 || index === 11 ? label : ""}</small>
                   </div>
-                  <b>{money(String(amount))}</b>
-                  <small>{label}</small>
-                </div>
-              ))}
-            </div>
-          )}
-          {monthReport && !monthError && (
-            <div className="dashboard-rent-totals">
-              <span><i className="is-received" /> {money(monthReport.rent.collected)} received</span>
-              <span><i className="is-charged" /> {money(monthReport.rent.charged)} charged</span>
-              <span><i className="is-expenses" /> {money(monthReport.expenses.total)} expenses</span>
+                );
+              })}
             </div>
           )}
         </section>
@@ -904,70 +889,65 @@ function Overview({
           <div className="dashboard-panel-heading">
             <div>
               <h2>Coming up</h2>
-              <p>Reminders and recent activity</p>
+              <p>Recent activity</p>
             </div>
             <Bell size={16} />
           </div>
-          {overview?.upcomingLeases.length ? (
+          {recentActivity.length ? (
             <div className="dashboard-upcoming-list">
-              {overview.upcomingLeases.slice(0, 4).map((lease) => (
+              {recentActivity.map((activity) => {
+                const action = activity.action.toLowerCase();
+                const ActivityIcon = action.includes("rent") || action.includes("payment")
+                  ? CircleDollarSign
+                  : action.includes("lease")
+                    ? CalendarDays
+                    : action.includes("maintenance") || action.includes("repair")
+                      ? Wrench
+                      : Clock3;
+                return (
+                  <article key={activity.id}>
+                    <span className="dashboard-activity-icon"><ActivityIcon size={17} /></span>
+                    <span className="dashboard-activity-copy">
+                      <b>{formatActivity(activity.action)}</b>
+                      <small>{formatActivity(activity.entityType)}</small>
+                    </span>
+                    <time>{new Intl.DateTimeFormat("en", { month: "short", day: "numeric" }).format(new Date(activity.createdAt))}</time>
+                  </article>
+                );
+              })}
+            </div>
+          ) : upcomingLeases.length ? (
+            <div className="dashboard-upcoming-list">
+              {upcomingLeases.map((lease) => (
                 <article key={lease.id}>
-                  <CalendarDays size={16} />
-                  <span><b>{lease.tenancy.tenant.legalName}</b><small>{lease.tenancy.unit.property.name} · {lease.tenancy.unit.unitNumber}</small></span>
+                  <span className="dashboard-activity-icon is-lease"><CalendarDays size={17} /></span>
+                  <span className="dashboard-activity-copy">
+                    <b>Lease ending · {lease.tenancy.tenant.legalName}</b>
+                    <small>{lease.tenancy.unit.property.name} · {lease.tenancy.unit.unitNumber}</small>
+                  </span>
                   <time>{new Intl.DateTimeFormat("en", { month: "short", day: "numeric" }).format(new Date(lease.endDate))}</time>
                 </article>
               ))}
-              <button type="button" onClick={() => onOpenSection("Maintenance")}>
-                <Wrench size={14} />
-                {summary?.openMaintenance ?? 0} open maintenance requests
-              </button>
             </div>
           ) : (
             <div className="dashboard-upcoming-empty">
-              <CalendarDays size={19} />
-              <span>No lease expiries in the next 60 days</span>
-              <button type="button" onClick={() => onOpenSection("Maintenance")}>
-                <Wrench size={14} />
-                {summary?.openMaintenance ?? 0} open maintenance requests
-              </button>
-            </div>
-          )}
-          {!!overview?.recentActivity.length && (
-            <div className="dashboard-recent-activity">
-              <h3>Recent activity</h3>
-              {overview.recentActivity.slice(0, 3).map((activity) => (
-                <div className="dashboard-activity-row" key={activity.id}>
-                  <span><Clock3 size={14} /></span>
-                  <div><b>{formatActivity(activity.action)}</b><small>{new Intl.DateTimeFormat("en", { month: "short", day: "numeric" }).format(new Date(activity.createdAt))}</small></div>
-                  <Check size={14} aria-label="Recorded" />
-                </div>
-              ))}
+              <span>No recent activity or upcoming lease expiries.</span>
+              {!!summary?.openMaintenance && (
+                <button type="button" onClick={() => onOpenSection("Maintenance")}>
+                  {summary.openMaintenance} open maintenance requests
+                </button>
+              )}
             </div>
           )}
         </section>
       </div>
 
-      <section className="dashboard-panel dashboard-properties-panel">
-        <div className="dashboard-panel-heading">
-          <div>
-            <h2>Your properties</h2>
-            <p>Properties connected to your account</p>
-          </div>
-          <button
-            className="dashboard-text-button"
-            type="button"
-            onClick={onOpenProperties}
-          >
-            View all properties <span aria-hidden="true">→</span>
-          </button>
-        </div>
-        {data.properties.length ? (
-          <div className="dashboard-property-list">
-            {data.properties.slice(0, 4).map((property) => (
-              <PropertyRow key={property.id} property={property} />
-            ))}
-          </div>
-        ) : (
+      {data.properties.length ? (
+        <section className="dashboard-featured-property" aria-label="Featured property">
+          <PropertyRow property={data.properties[0]} onClick={onOpenProperties} />
+        </section>
+      ) : (
+        <section className="dashboard-panel dashboard-properties-panel">
           <div className="dashboard-properties-empty">
             <Building2 size={19} />
             <span>No properties added yet</span>
@@ -976,8 +956,8 @@ function Overview({
               portfolio.
             </small>
           </div>
-        )}
-      </section>
+        </section>
+      )}
     </>
   );
 }
@@ -986,24 +966,19 @@ function MetricCard({
   label,
   value,
   note,
-  icon: Icon,
   attention = false,
-  tone = "blue",
   onClick,
 }: {
   label: string;
   value: string;
   note: string;
-  icon: LucideIcon;
   attention?: boolean;
-  tone?: "blue" | "violet" | "green" | "amber";
   onClick?: () => void;
 }) {
   return (
-    <button className={`dashboard-metric-card is-${tone}`} type="button" onClick={onClick}>
+    <button className="dashboard-metric-card" type="button" onClick={onClick}>
       <div className="dashboard-metric-heading">
         <span>{label}</span>
-        <span className="dashboard-metric-icon"><Icon size={18} /></span>
       </div>
       <strong>{value}</strong>
       <small className={attention ? "is-attention" : ""}>
@@ -1014,9 +989,15 @@ function MetricCard({
   );
 }
 
-function PropertyRow({ property }: { property: Property }) {
-  return (
-    <article className="dashboard-property-row">
+function PropertyRow({
+  property,
+  onClick,
+}: {
+  property: Property;
+  onClick?: () => void;
+}) {
+  const content = (
+    <>
       <span className="dashboard-property-thumbnail">
         <Building2 size={19} />
       </span>
@@ -1029,9 +1010,18 @@ function PropertyRow({ property }: { property: Property }) {
       </span>
       <span className="dashboard-status-pill">
         <i aria-hidden="true" />
-        {property.status.toLowerCase()}
+        {property._count.units} {property._count.units === 1 ? "unit" : "units"}
       </span>
-    </article>
+      {onClick && <ChevronDown size={19} aria-hidden="true" />}
+    </>
+  );
+
+  return onClick ? (
+    <button className="dashboard-property-row" onClick={onClick} type="button">
+      {content}
+    </button>
+  ) : (
+    <article className="dashboard-property-row is-static">{content}</article>
   );
 }
 

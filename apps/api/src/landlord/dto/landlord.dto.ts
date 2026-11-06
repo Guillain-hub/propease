@@ -17,6 +17,7 @@ import { Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   IsArray,
+  ArrayUnique,
   IsDateString,
   IsEmail,
   IsEnum,
@@ -51,6 +52,11 @@ export class PropertyInput {
   @IsString()
   @MaxLength(5000)
   description?: string;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
+  propertyOwnerId?: string;
 }
 
 export class PropertyUpdateInput {
@@ -74,6 +80,11 @@ export class PropertyUpdateInput {
   @IsString()
   @MaxLength(5000)
   description?: string;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
+  propertyOwnerId?: string | null;
 
   @IsOptional()
   @IsEnum(PropertyStatus)
@@ -596,11 +607,60 @@ export class TeamInviteInput {
 
   @IsEnum(MembershipRole)
   role!: MembershipRole;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(100)
+  @ArrayUnique()
+  @Matches(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i, { each: true })
+  propertyIds?: string[];
 }
 
 export class TeamRoleInput {
   @IsEnum(MembershipRole)
   role!: MembershipRole;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(100)
+  @ArrayUnique()
+  @Matches(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i, { each: true })
+  propertyIds?: string[];
+}
+
+export class PropertyOwnerInput {
+  @IsString()
+  @MinLength(2)
+  @MaxLength(180)
+  name!: string;
+
+  @IsOptional()
+  @IsEmail()
+  @MaxLength(320)
+  email?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  phone?: string;
+}
+
+export class PropertyOwnerUpdateInput {
+  @IsOptional()
+  @IsString()
+  @MinLength(2)
+  @MaxLength(180)
+  name?: string;
+
+  @IsOptional()
+  @IsEmail()
+  @MaxLength(320)
+  email?: string | null;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  phone?: string | null;
 }
 
 export class OrganisationSettingsInput {

@@ -1,16 +1,25 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDownToLine,
+  Building2,
   Check,
+  ClipboardCheck,
   CircleDollarSign,
+  Droplets,
   FileText,
+  KeyRound,
   LoaderCircle,
   Plus,
+  Receipt,
   RefreshCw,
   Upload,
+  Users,
+  X,
+  Wrench,
 } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 
 type SectionName =
   | "Properties"
@@ -38,6 +47,33 @@ type Field = {
   placeholder?: string;
 };
 type ApiError = { message?: string | string[] };
+type SectionIcon = LucideIcon;
+type TextRequest = {
+  title: string;
+  description: string;
+  label: string;
+  initialValue?: string;
+  type?: "text" | "date" | "number";
+  required?: boolean;
+  multiline?: boolean;
+};
+
+const sectionIcons: Record<SectionName, SectionIcon> = {
+  Properties: Building2,
+  Units: KeyRound,
+  Tenants: Users,
+  Leases: FileText,
+  Inspections: ClipboardCheck,
+  "Rent & Deposits": CircleDollarSign,
+  Expenses: Receipt,
+  Utilities: Droplets,
+  Maintenance: Wrench,
+  Notices: FileText,
+  Reports: FileText,
+  Team: Users,
+  Subscription: CircleDollarSign,
+  Settings: FileText,
+};
 
 const apiBaseUrl = (
   process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000/api/v1"
@@ -149,14 +185,22 @@ export function LandlordSectionWorkspace({
   const [data, setData] = useState<ValueRecord>({});
   const [form, setForm] = useState<Record<string, string>>({});
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [formOpen, setFormOpen] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [rentMode, setRentMode] = useState<"charges" | "payments" | "deposits">("charges");
   const [tenantMode, setTenantMode] = useState<"tenants" | "tenancies">("tenants");
+  const [propertyView, setPropertyView] = useState<"properties" | "owners">("properties");
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
+  const formDialogRef = useRef<HTMLDivElement>(null);
+  const addButtonRef = useRef<HTMLButtonElement>(null);
+  const savingRef = useRef(saving);
+  savingRef.current = saving;
+  const [textRequest, setTextRequest] = useState<TextRequest | null>(null);
+  const textRequestResolver = useRef<((value: string | null) => void) | null>(null);
 
   const base = `/organisations/${organisationId}/landlord`;
 
@@ -165,7 +209,12 @@ export function LandlordSectionWorkspace({
     setError(null);
     try {
       const endpoints: Record<SectionName, Array<[string, string, string?]>> = {
-        Properties: [["properties", "properties", "properties"]],
+        Properties: [
+          ["properties", "properties", "properties"],
+          ...(role === "OWNER" || role === "ADMIN"
+            ? [["property-owners", "propertyOwners", "owners"] as [string, string, string]]
+            : []),
+        ],
         Units: [["units", "units", "units"], ["properties", "properties", "properties"]],
         Tenants: [["tenants", "tenants", "tenants"], ["tenancies", "tenancies", "tenancies"], ["units", "units", "units"]],
         Leases: [["leases", "leases", "leases"], ["tenancies", "tenancies", "tenancies"]],
@@ -173,10 +222,17 @@ export function LandlordSectionWorkspace({
         "Rent & Deposits": [["rent/charges", "charges", "charges"], ["rent/payments", "payments", "payments"], ["rent/deposits", "deposits", "deposits"], ["tenants", "tenants", "tenants"], ["tenancies", "tenancies", "tenancies"]],
         Expenses: [["expenses", "expenses", "expenses"], ["properties", "properties", "properties"]],
         Utilities: [["utilities", "utilityBills", "utilityBills"], ["properties", "properties", "properties"], ["units", "units", "units"]],
-        Maintenance: [["maintenance", "requests", "requests"], ["units", "units", "units"], ["tenants", "tenants", "tenants"], ["team", "members", "members"]],
+        Maintenance: role === "MAINTENANCE_STAFF"
+          ? [["maintenance", "requests", "requests"]]
+          : [["maintenance", "requests", "requests"], ["units", "units", "units"], ["tenants", "tenants", "tenants"], ["team", "members", "members"]],
         Notices: [["notices", "notices", "notices"], ["tenancies", "tenancies", "tenancies"]],
-        Reports: [["reports/financial", "report"]],
-        Team: [["team", "members", "members"]],
+        Reports: [
+          ["reports/financial", "report"],
+          ...(role === "OWNER" || role === "ADMIN"
+            ? [["property-owners", "propertyOwners", "owners"] as [string, string, string]]
+            : []),
+        ],
+        Team: [["team", "members", "members"], ["properties", "properties", "properties"]],
         Subscription: [["subscription", "subscription"]],
         Settings: [["settings", "settings"]],
       };
@@ -209,7 +265,7 @@ export function LandlordSectionWorkspace({
     } finally {
       setLoading(false);
     }
-  }, [base, section, refreshKey]);
+  }, [base, section, refreshKey, role]);
 
   useEffect(() => {
     void load();
@@ -217,8 +273,47 @@ export function LandlordSectionWorkspace({
 
   useEffect(() => {
     setEditingId(null);
+    setFormOpen(false);
     setForm({});
   }, [section]);
+
+  useEffect(() => {
+    if (!formOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    formDialogRef.current
+      ?.querySelector<HTMLElement>(".landlord-field input:not([type='file']), .landlord-field select, .landlord-field textarea")
+      ?.focus();
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape" && !savingRef.current) {
+        setFormOpen(false);
+        return;
+      }
+      if (event.key === "Tab") {
+        const focusable = formDialogRef.current?.querySelectorAll<HTMLElement>(
+          "button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex='-1'])",
+        );
+        if (!focusable?.length) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+    }
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener("keydown", handleKeyDown);
+      addButtonRef.current?.focus();
+    };
+  }, [formOpen]);
 
   const properties = rowsFor(data, "properties");
   const units = rowsFor(data, "units");
@@ -229,6 +324,10 @@ export function LandlordSectionWorkspace({
 
   const fields: Field[] = useMemo(() => {
     const propertyOptions = selectOptions(properties, (row) => stringValue(row.name));
+    const propertyOwnerOptions = selectOptions(
+      rowsFor(data, "propertyOwners"),
+      (row) => stringValue(row.name),
+    );
     const unitOptions = selectOptions(units, (row) =>
       `${stringValue(nested(row, "property", "name"))} · ${stringValue(row.unitNumber)}`,
     );
@@ -247,6 +346,13 @@ export function LandlordSectionWorkspace({
     );
     switch (section) {
       case "Properties":
+        if (propertyView === "owners") {
+          return [
+            { name: "name", label: "Owner name", required: true },
+            { name: "email", label: "Email address", type: "email" },
+            { name: "phone", label: "Phone number" },
+          ];
+        }
         return [
           { name: "name", label: "Property name", required: true },
           { name: "type", label: "Property type", required: true, options: [
@@ -257,6 +363,9 @@ export function LandlordSectionWorkspace({
             { value: "OTHER", label: "Other" },
           ] },
           { name: "address", label: "Address", required: true },
+          ...(["OWNER", "ADMIN"].includes(role)
+            ? [{ name: "propertyOwnerId", label: "Property owner", options: propertyOwnerOptions }]
+            : []),
           { name: "description", label: "Description", type: "textarea" },
           { name: "status", label: "Status", options: [
             { value: "ACTIVE", label: "Active" },
@@ -428,25 +537,76 @@ export function LandlordSectionWorkspace({
           { name: "role", label: "Role", required: true, options: [
             ...(role === "OWNER" ? [{ value: "ADMIN", label: "Admin" }] : []),
             ...(role === "OWNER" || role === "ADMIN" ? [{ value: "MANAGER", label: "Manager" }] : []),
-            { value: "STAFF", label: "Staff" },
+            ...(role === "OWNER" ? [{ value: "ACCOUNTANT", label: "Accountant" }, { value: "MAINTENANCE_STAFF", label: "Maintenance staff" }] : []),
           ] },
+          ...(form.role === "MANAGER"
+            ? [{
+                name: "propertyIds",
+                label: "Assigned properties",
+                type: "multi" as const,
+                required: true,
+                options: propertyOptions,
+              }]
+            : []),
         ];
       default:
         return [];
     }
-  }, [section, properties, units, tenants, tenancies, charges, deposits, currency, rentMode, tenantMode, form, role]);
+  }, [section, properties, units, tenants, tenancies, charges, deposits, currency, rentMode, tenantMode, propertyView, data, form, role]);
 
   function updateField(name: string, value: string) {
     setForm((current) => ({ ...current, [name]: value }));
   }
 
+  function openForm() {
+    setEditingId(null);
+    setForm({});
+    setSelectedFile(null);
+    setError(null);
+    setSuccess(null);
+    setFormOpen(true);
+  }
+
+  function closeForm() {
+    if (saving) return;
+    setFormOpen(false);
+    setEditingId(null);
+    setForm({});
+    setSelectedFile(null);
+    setError(null);
+  }
+
+  function requestText(request: TextRequest): Promise<string | null> {
+    return new Promise((resolve) => {
+      textRequestResolver.current?.(null);
+      textRequestResolver.current = resolve;
+      setTextRequest(request);
+    });
+  }
+
+  function resolveTextRequest(value: string | null) {
+    const resolve = textRequestResolver.current;
+    textRequestResolver.current = null;
+    setTextRequest(null);
+    resolve?.(value);
+  }
+
   function editRecord(row: ValueRecord) {
     if (typeof row.id !== "string") return;
     const values: Record<string, unknown> = section === "Properties"
-      ? {
+      ? propertyView === "owners"
+        ? {
+            name: row.name,
+            email: row.email,
+            phone: row.phone,
+          }
+        : {
           name: row.name,
           type: row.type,
           address: row.address,
+          ...(canManagePropertyOwners
+            ? { propertyOwnerId: nested(row, "propertyOwner", "id") }
+            : {}),
           description: row.description,
           status: row.status,
         }
@@ -480,6 +640,7 @@ export function LandlordSectionWorkspace({
     setSelectedFile(null);
     setError(null);
     setSuccess(null);
+    setFormOpen(true);
   }
 
   async function uploadFile(file: File): Promise<string> {
@@ -529,9 +690,17 @@ export function LandlordSectionWorkspace({
       let routeId = "";
       switch (section) {
         case "Properties":
-          path = "properties";
-          payload = { ...form };
-          label = "Property added";
+          if (propertyView === "owners") {
+            path = "property-owners";
+            payload = Object.fromEntries(Object.entries(form).filter(([, value]) => value !== ""));
+            label = "Property owner saved";
+          } else {
+            path = "properties";
+            payload = canManagePropertyOwners
+              ? { ...form, propertyOwnerId: form.propertyOwnerId || null }
+              : { ...form };
+            label = "Property added";
+          }
           break;
         case "Units":
           path = `properties/${form.propertyId}/units`;
@@ -659,7 +828,13 @@ export function LandlordSectionWorkspace({
           break;
         case "Team":
           path = "team";
-          payload = { email: form.email, role: form.role };
+          payload = {
+            email: form.email,
+            role: form.role,
+            ...(form.role === "MANAGER"
+              ? { propertyIds: form.propertyIds.split(",").filter(Boolean) }
+              : {}),
+          };
           label = "Invitation created. The collaborator must sign in and accept it.";
           break;
         case "Settings":
@@ -673,12 +848,12 @@ export function LandlordSectionWorkspace({
 
       if (editingId) {
         const collection = section === "Properties"
-          ? "properties"
+          ? propertyView === "owners" ? "property-owners" : "properties"
           : section === "Units"
             ? "units"
             : "tenants";
         path = `${collection}/${editingId}`;
-        label = `${section === "Properties" ? "Property" : section === "Units" ? "Unit" : "Tenant"} updated`;
+        label = `${section === "Properties" ? propertyView === "owners" ? "Property owner" : "Property" : section === "Units" ? "Unit" : "Tenant"} updated`;
       }
       const result = await apiRequest<ValueRecord>(`${base}/${path}`, {
         method: editingId || section === "Settings" ? "PATCH" : "POST",
@@ -686,7 +861,7 @@ export function LandlordSectionWorkspace({
       });
       const resultKey = section === "Rent & Deposits" && rentMode === "charges" ? "charge"
         : section === "Rent & Deposits" && rentMode === "payments" ? "payment"
-          : section === "Properties" ? "property"
+          : section === "Properties" ? propertyView === "owners" ? "owner" : "property"
             : section === "Units" ? "unit"
               : section === "Tenants" ? tenantMode === "tenancies" ? "tenancy" : "tenant"
                 : section === "Leases" ? "lease"
@@ -719,6 +894,7 @@ export function LandlordSectionWorkspace({
       setForm(section === "Settings" ? form : {});
       setEditingId(null);
       setSelectedFile(null);
+      setFormOpen(false);
       setRefreshKey((key) => key + 1);
       onUpdated();
     } catch (requestError) {
@@ -811,15 +987,25 @@ export function LandlordSectionWorkspace({
     if (typeof row.id !== "string") return;
     const body: ValueRecord = { status };
     if (status === "ACTIVE") {
-      const signedAt = window.prompt(
-        "Enter the signed date (YYYY-MM-DD)",
-        new Date().toISOString().slice(0, 10),
-      );
+      const signedAt = await requestText({
+        title: "Activate lease",
+        description: "Enter the date the lease was signed.",
+        label: "Signed date",
+        initialValue: new Date().toISOString().slice(0, 10),
+        type: "date",
+        required: true,
+      });
       if (!signedAt) return;
       body.signedAt = `${signedAt}T00:00:00.000Z`;
     }
     if (status === "TERMINATED") {
-      const terminationReason = window.prompt("Enter the reason for termination");
+      const terminationReason = await requestText({
+        title: "Terminate lease",
+        description: "Provide a reason for terminating this lease.",
+        label: "Termination reason",
+        required: true,
+        multiline: true,
+      });
       if (!terminationReason?.trim()) return;
       body.terminationReason = terminationReason;
     }
@@ -839,10 +1025,14 @@ export function LandlordSectionWorkspace({
 
   async function moveOut(row: ValueRecord) {
     if (typeof row.id !== "string") return;
-    const moveOutDate = window.prompt(
-      "Enter the move-out date (YYYY-MM-DD)",
-      new Date().toISOString().slice(0, 10),
-    );
+    const moveOutDate = await requestText({
+      title: "Record move-out",
+      description: "Choose the date the tenant moved out.",
+      label: "Move-out date",
+      initialValue: new Date().toISOString().slice(0, 10),
+      type: "date",
+      required: true,
+    });
     if (!moveOutDate) return;
     setError(null);
     try {
@@ -862,6 +1052,7 @@ export function LandlordSectionWorkspace({
     const params = new URLSearchParams();
     if (form.from) params.set("from", form.from);
     if (form.to) params.set("to", form.to);
+    if (form.ownerId) params.set("ownerId", form.ownerId);
     try {
       const query = params.toString() ? `?${params.toString()}` : "";
       const report = await apiRequest<ValueRecord>(`${base}/reports/financial${query}`);
@@ -887,6 +1078,17 @@ export function LandlordSectionWorkspace({
     }
   }
 
+  async function requestReversal(path: string) {
+    const reason = await requestText({
+      title: "Reverse record",
+      description: "This action will be recorded in the audit history.",
+      label: "Reason for reversal",
+      required: true,
+      multiline: true,
+    });
+    if (reason?.trim()) await reverseRecord(path, reason);
+  }
+
   async function downloadFile(fileId: string) {
     try {
       const result = await apiRequest<{ downloadUrl: string }>(
@@ -903,9 +1105,47 @@ export function LandlordSectionWorkspace({
   }
 
   const canManageRecords = ["OWNER", "ADMIN", "MANAGER"].includes(role);
-  const formDisabled = saving || !canManageRecords;
-  const sectionItemName = section.toLowerCase().replace(/ies$/, "y").replace(/s$/, "");
+  const canManageFinancialRecords = [
+    "OWNER",
+    "ADMIN",
+    "MANAGER",
+    "ACCOUNTANT",
+  ].includes(role);
+  const canManagePropertyOwners = ["OWNER", "ADMIN"].includes(role);
+  const canManageCurrentRecords =
+    section === "Properties" && propertyView === "owners"
+      ? canManagePropertyOwners
+      : section === "Rent & Deposits" || section === "Expenses" || section === "Utilities"
+        ? canManageFinancialRecords
+        : canManageRecords;
+  const canUpdateMaintenance =
+    canManageRecords || role === "MAINTENANCE_STAFF";
+  const formDisabled = saving || !canManageCurrentRecords;
+  const sectionItemName = section === "Properties" && propertyView === "owners"
+    ? "property owner"
+    : section.toLowerCase().replace(/ies$/, "y").replace(/s$/, "");
   const title = section === "Rent & Deposits" ? "Rent & deposits" : section;
+  const formActionLabel = section === "Properties"
+    ? propertyView === "owners" ? "Add property owner" : "Add property"
+    : section === "Units"
+      ? "Add unit"
+      : section === "Tenants"
+        ? tenantMode === "tenancies" ? "Create tenancy" : "Add tenant"
+        : section === "Leases"
+          ? "Add lease"
+          : section === "Inspections"
+            ? "Record inspection"
+            : section === "Rent & Deposits"
+              ? rentMode === "charges" ? "Create rent charge" : rentMode === "payments" ? "Record payment" : "Record deposit transaction"
+              : section === "Expenses"
+                ? "Add expense"
+                : section === "Utilities"
+                  ? "Add utility bill"
+                  : section === "Maintenance"
+                    ? "Create request"
+                    : section === "Notices" ? "Create notice" : `Add ${sectionItemName}`;
+  const formTitle = editingId ? `Edit ${sectionItemName}` : formActionLabel;
+  const FormIcon = sectionIcons[section];
   const subtitle: Record<SectionName, string> = {
     Properties: "Add and maintain the buildings in your organisation.",
     Units: "Manage rental units, rent amounts, availability, and utilities.",
@@ -941,9 +1181,30 @@ export function LandlordSectionWorkspace({
         </button>
       </div>
 
-      {error && <div className="landlord-alert is-error" role="alert">{error}</div>}
+      {error && !formOpen && <div className="landlord-alert is-error" role="alert">{error}</div>}
       {success && <div className="landlord-alert is-success" role="status"><Check size={16} />{success}</div>}
 
+      {section === "Properties" && canManagePropertyOwners && (
+        <div className="landlord-tabs" role="tablist" aria-label="Property records">
+          {(["properties", "owners"] as const).map((view) => (
+            <button
+              className={propertyView === view ? "is-active" : ""}
+              key={view}
+              onClick={() => {
+                setPropertyView(view);
+                setForm({});
+                setFormOpen(false);
+                setEditingId(null);
+              }}
+              type="button"
+              role="tab"
+              aria-selected={propertyView === view}
+            >
+              {view === "properties" ? "Properties" : "Owners"}
+            </button>
+          ))}
+        </div>
+      )}
       {section === "Rent & Deposits" && (
         <div className="landlord-tabs" role="tablist" aria-label="Rent and deposit records">
           {(["charges", "payments", "deposits"] as const).map((mode) => (
@@ -983,7 +1244,11 @@ export function LandlordSectionWorkspace({
           currency={currency}
           from={form.from ?? ""}
           to={form.to ?? ""}
+          ownerId={form.ownerId ?? ""}
+          owners={rowsFor(data, "propertyOwners")}
+          canFilterByOwner={canManagePropertyOwners}
           onDateChange={updateField}
+          onOwnerChange={(value) => updateField("ownerId", value)}
           onApply={() => void applyReport()}
         />
       ) : section === "Subscription" ? (
@@ -1008,64 +1273,47 @@ export function LandlordSectionWorkspace({
         </section>
       ) : (
         <div className="landlord-workspace-grid">
-          <section className="landlord-panel landlord-form-panel">
-            <div className="landlord-panel-heading">
-              <div>
-                <h2>{editingId ? `Edit ${sectionItemName}` : section === "Rent & Deposits" ? rentMode === "charges" ? "Create rent charge" : rentMode === "payments" ? "Record manual payment" : "Record deposit transaction" : `Add ${sectionItemName}`}</h2>
-                <p>{section === "Rent & Deposits" && rentMode === "payments" ? "Manually recorded, not independently bank-verified." : "Fields marked required must be completed."}</p>
-              </div>
-              <Plus size={17} />
-            </div>
-            <Form
-              fields={fields}
-              values={form}
-              onChange={updateField}
-              onSubmit={submit}
-              disabled={formDisabled}
-              saving={saving}
-              selectedFile={selectedFile}
-              onFile={setSelectedFile}
-              submitLabel={editingId ? "Save changes" : undefined}
-            />
-            {editingId && (
-              <button
-                className="landlord-text-action"
-                type="button"
-                onClick={() => { setEditingId(null); setForm({}); }}
-              >
-                Cancel edit
-              </button>
-            )}
-            {section === "Rent & Deposits" && rentMode === "payments" && (
-              <p className="landlord-help-text">An allocation is optional; if omitted, the payment remains unapplied and the rent balance will not be reduced.</p>
-            )}
-            {section === "Utilities" && (
-              <p className="landlord-help-text">The total is split equally across selected units using whole cents; any remainder cents are assigned one by one.</p>
-            )}
-          </section>
-
           <section className="landlord-panel landlord-records-panel">
             <div className="landlord-panel-heading">
-              <div><h2>{section === "Rent & Deposits" ? rentMode === "charges" ? "Rent charges" : rentMode === "payments" ? "Recorded payments" : "Deposit ledgers" : `Current ${section.toLowerCase()}`}</h2><p>{loading ? "Loading records..." : "Most recent records appear first."}</p></div>
-              {loading && <LoaderCircle className="landlord-spinner" size={17} />}
+              <div>
+                <h2>{section === "Rent & Deposits" ? rentMode === "charges" ? "Rent charges" : rentMode === "payments" ? "Recorded payments" : "Deposit ledgers" : section === "Tenants" && tenantMode === "tenancies" ? "Tenancies" : section}</h2>
+                <p>{loading ? "Loading records..." : "Review and manage your latest records."}</p>
+              </div>
+              <div className="landlord-records-heading-actions">
+                {loading && <LoaderCircle className="landlord-spinner" size={17} />}
+                {canManageCurrentRecords && (
+                  <button
+                    className="dashboard-primary-button landlord-add-record-button"
+                    ref={addButtonRef}
+                    type="button"
+                    onClick={openForm}
+                  >
+                    <Plus size={16} /> {formActionLabel}
+                  </button>
+                )}
+              </div>
             </div>
-            {section === "Rent & Deposits" ? (
+            {section === "Properties" && propertyView === "owners" ? (
+              <PropertyOwnerList
+                rows={rowsFor(data, "propertyOwners")}
+                onEdit={canManagePropertyOwners ? editRecord : undefined}
+              />
+            ) : section === "Rent & Deposits" ? (
               <RecordList
                 rows={rentMode === "charges" ? charges : rentMode === "payments" ? rowsFor(data, "payments") : deposits}
                 currency={currency}
                 section={section}
                 rentMode={rentMode}
-                onReverse={(path) => {
-                  const reason = window.prompt("Enter the reason for this reversal");
-                  if (reason) void reverseRecord(path, reason);
-                }}
+                onReverse={(path) => void requestReversal(path)}
                 onReceipt={(id) => void downloadReceipt(id)}
               />
             ) : section === "Maintenance" ? (
               <MaintenanceList
                 rows={rowsFor(data, "requests")}
                 members={rowsFor(data, "members")}
-                onUpdate={canManageRecords ? updateMaintenance : undefined}
+                onUpdate={canUpdateMaintenance ? updateMaintenance : undefined}
+                requestText={requestText}
+                role={role}
               />
             ) : section === "Utilities" ? (
               <RecordList
@@ -1073,10 +1321,7 @@ export function LandlordSectionWorkspace({
                 currency={currency}
                 section={section}
                 onDownload={(fileId) => void downloadFile(fileId)}
-                onReverse={(path) => {
-                  const reason = window.prompt("Enter the reason for this reversal");
-                  if (reason) void reverseRecord(path, reason);
-                }}
+                onReverse={(path) => void requestReversal(path)}
               />
             ) : section === "Expenses" ? (
               <RecordList
@@ -1084,10 +1329,7 @@ export function LandlordSectionWorkspace({
                 currency={currency}
                 section={section}
                 onDownload={(fileId) => void downloadFile(fileId)}
-                onReverse={(path) => {
-                  const reason = window.prompt("Enter the reason for this reversal");
-                  if (reason) void reverseRecord(path, reason);
-                }}
+                onReverse={(path) => void requestReversal(path)}
               />
             ) : section === "Leases" ? (
               <RecordList
@@ -1111,10 +1353,72 @@ export function LandlordSectionWorkspace({
                 onMoveOut={section === "Tenants" && tenantMode === "tenancies" ? (row) => void moveOut(row) : undefined}
               />
             )}
-            {!loading && rowsFor(data, section === "Tenants" && tenantMode === "tenancies" ? "tenancies" : sectionDataKey(section, rentMode)).length === 0 && (
-              <p className="landlord-empty-state">No records yet. Use the form to add the first one.</p>
+            {!loading && rowsFor(data, section === "Properties" && propertyView === "owners" ? "propertyOwners" : section === "Tenants" && tenantMode === "tenancies" ? "tenancies" : sectionDataKey(section, rentMode)).length === 0 && (
+              <p className="landlord-empty-state">No records yet. Add your first record to get started.</p>
             )}
           </section>
+
+          {formOpen && (
+            <div
+              className="landlord-form-modal-backdrop"
+              onMouseDown={(event) => {
+                if (event.target === event.currentTarget) closeForm();
+              }}
+            >
+              <div
+                className="landlord-form-modal"
+                ref={formDialogRef}
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="landlord-form-modal-title"
+                tabIndex={-1}
+              >
+                <div className="landlord-form-modal-header">
+                  <span className="landlord-form-modal-icon" aria-hidden="true"><FormIcon size={20} /></span>
+                  <div>
+                    <span className="dashboard-date">PROPEASE WORKSPACE</span>
+                    <h2 id="landlord-form-modal-title">{formTitle}</h2>
+                    <p>{section === "Rent & Deposits" && rentMode === "payments" ? "Manually recorded, not independently bank-verified." : "Complete the fields below to continue."}</p>
+                  </div>
+                  <button
+                    className="landlord-form-modal-close"
+                    type="button"
+                    aria-label="Close form"
+                    onClick={closeForm}
+                    disabled={saving}
+                  >
+                    <X size={19} />
+                  </button>
+                </div>
+                {error && <div className="landlord-alert is-error" role="alert">{error}</div>}
+                <Form
+                  fields={fields}
+                  values={form}
+                  onChange={updateField}
+                  onSubmit={submit}
+                  disabled={formDisabled}
+                  saving={saving}
+                  selectedFile={selectedFile}
+                  onFile={setSelectedFile}
+                  submitLabel={editingId ? "Save changes" : undefined}
+                  onCancel={closeForm}
+                  helperText={section === "Rent & Deposits" && rentMode === "payments"
+                    ? "An allocation is optional; if omitted, the payment remains unapplied and the rent balance will not be reduced."
+                    : section === "Utilities"
+                      ? "The total is split equally across selected units using whole cents; any remainder cents are assigned one by one."
+                      : undefined}
+                />
+              </div>
+            </div>
+          )}
+          {textRequest && (
+            <TextEntryDialog
+              key={`${textRequest.title}-${textRequest.label}`}
+              request={textRequest}
+              onCancel={() => resolveTextRequest(null)}
+              onSubmit={resolveTextRequest}
+            />
+          )}
         </div>
       )}
     </div>
@@ -1136,6 +1440,163 @@ export function LandlordSectionWorkspace({
       setError(requestError instanceof Error ? requestError.message : "The receipt could not be downloaded.");
     }
   }
+}
+
+function TextEntryDialog({
+  request,
+  onCancel,
+  onSubmit,
+}: {
+  request: TextRequest;
+  onCancel: () => void;
+  onSubmit: (value: string | null) => void;
+}) {
+  const [value, setValue] = useState(request.initialValue ?? "");
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const onCancelRef = useRef(onCancel);
+  onCancelRef.current = onCancel;
+
+  useEffect(() => {
+    setValue(request.initialValue ?? "");
+  }, [request]);
+
+  useEffect(() => {
+    const previousActiveElement = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    (inputRef.current ?? textareaRef.current)?.focus();
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onCancelRef.current();
+      } else if (event.key === "Tab") {
+        const focusable = dialogRef.current?.querySelectorAll<HTMLElement>(
+          "button:not([disabled]), input:not([disabled]), textarea:not([disabled])",
+        );
+        if (!focusable?.length) return;
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+    }
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener("keydown", handleKeyDown);
+      previousActiveElement?.focus();
+    };
+  }, []);
+
+  return (
+    <div
+      className="landlord-form-modal-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onCancel();
+      }}
+    >
+      <div
+        className="landlord-form-modal landlord-text-entry-modal"
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="landlord-text-entry-title"
+        tabIndex={-1}
+      >
+        <div className="landlord-form-modal-header">
+          <span className="landlord-form-modal-icon" aria-hidden="true"><FileText size={20} /></span>
+          <div>
+            <span className="dashboard-date">PROPEASE WORKSPACE</span>
+            <h2 id="landlord-text-entry-title">{request.title}</h2>
+            <p>{request.description}</p>
+          </div>
+          <button className="landlord-form-modal-close" type="button" aria-label="Close dialog" onClick={onCancel}>
+            <X size={19} />
+          </button>
+        </div>
+        <form
+          className="landlord-prompt-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            onSubmit(value);
+          }}
+        >
+          <label className="landlord-field">
+            <span>{request.label}{request.required && <i aria-hidden="true"> *</i>}</span>
+            {request.multiline ? (
+              <textarea
+                onChange={(event) => setValue(event.currentTarget.value)}
+                ref={textareaRef}
+                required={request.required}
+                rows={4}
+                value={value}
+              />
+            ) : (
+              <input
+                onChange={(event) => setValue(event.currentTarget.value)}
+                ref={inputRef}
+                required={request.required}
+                type={request.type ?? "text"}
+                value={value}
+              />
+            )}
+          </label>
+          <div className="landlord-form-actions">
+            <button className="dashboard-primary-button" type="submit">Continue</button>
+            <button className="landlord-form-cancel-button" type="button" onClick={onCancel}>Cancel</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function PropertyOwnerList({
+  rows,
+  onEdit,
+}: {
+  rows: ValueRecord[];
+  onEdit?: (row: ValueRecord) => void;
+}) {
+  if (!rows.length) return null;
+  return (
+    <div className="landlord-record-table-wrap">
+      <table className="landlord-record-table">
+        <thead>
+          <tr>
+            <th scope="col">Owner</th>
+            <th scope="col">Contact</th>
+            <th scope="col">Properties</th>
+            {onEdit && <th scope="col"><span className="visually-hidden">Actions</span></th>}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((owner) => (
+            <tr key={stringValue(owner.id)}>
+              <td><div className="landlord-record-main"><b>{stringValue(owner.name)}</b></div></td>
+              <td><div className="landlord-record-details">
+                {typeof owner.email === "string" && <small>{owner.email}</small>}
+                {typeof owner.phone === "string" && <small>{owner.phone}</small>}
+              </div></td>
+              <td>{stringValue(nested(owner, "_count", "properties"), "0")}</td>
+              {onEdit && <td><button className="landlord-text-action" type="button" onClick={() => onEdit(owner)}>Edit</button></td>}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 
 function sectionDataKey(section: SectionName, rentMode: "charges" | "payments" | "deposits"): string {
@@ -1165,6 +1626,8 @@ function Form({
   submitLabel,
   selectedFile,
   onFile,
+  onCancel,
+  helperText,
 }: {
   fields: Field[];
   values: Record<string, string>;
@@ -1175,6 +1638,8 @@ function Form({
   submitLabel?: string;
   selectedFile?: File | null;
   onFile?: (file: File | null) => void;
+  onCancel?: () => void;
+  helperText?: string;
 }) {
   return (
     <form className="landlord-form" onSubmit={onSubmit}>
@@ -1240,10 +1705,18 @@ function Form({
         ))}
       </div>
       {disabled && <p className="landlord-help-text">Your role can view this section but cannot make changes.</p>}
-      <button className="dashboard-primary-button" disabled={disabled || saving} type="submit">
-        {saving ? <LoaderCircle className="landlord-spinner" size={15} /> : <Plus size={15} />}
-        {saving ? "Saving…" : submitLabel ?? "Save record"}
-      </button>
+      {helperText && <p className="landlord-form-helper">{helperText}</p>}
+      <div className="landlord-form-actions">
+        <button className="dashboard-primary-button" disabled={disabled || saving} type="submit">
+          {saving ? <LoaderCircle className="landlord-spinner" size={15} /> : <Plus size={15} />}
+          {saving ? "Saving…" : submitLabel ?? "Save record"}
+        </button>
+        {onCancel && (
+          <button className="landlord-form-cancel-button" disabled={saving} onClick={onCancel} type="button">
+            Cancel
+          </button>
+        )}
+      </div>
     </form>
   );
 }
@@ -1273,12 +1746,66 @@ function RecordList({
   tenantMode?: "tenants" | "tenancies";
   onMoveOut?: (row: ValueRecord) => void;
 }) {
+  const recordHeadings: Partial<Record<SectionName, string>> = {
+    Leases: "Lease",
+    Inspections: "Inspection",
+    Expenses: "Expense",
+    Utilities: "Utility bill",
+    Maintenance: "Request",
+    Notices: "Notice",
+    Team: "Member",
+    Settings: "Activity",
+  };
+  const recordHeading = section === "Properties"
+    ? "Property"
+    : section === "Units"
+      ? "Unit"
+      : section === "Tenants"
+        ? tenantMode === "tenancies" ? "Tenancy" : "Tenant"
+        : section === "Rent & Deposits"
+          ? rentMode === "charges" ? "Rent charge" : rentMode === "payments" ? "Payment" : "Deposit"
+          : recordHeadings[section] ?? section;
+  const amountHeading = section === "Units"
+    ? "Deposit"
+    : section === "Rent & Deposits"
+      ? rentMode === "charges" ? "Charge" : rentMode === "payments" ? "Payment" : "Amount"
+      : section === "Utilities" ? "Total"
+        : "Amount";
+  const showAmount = section === "Units"
+    || section === "Expenses"
+    || section === "Utilities"
+    || (section === "Rent & Deposits" && rentMode !== "deposits");
+  const showStatus = section === "Properties"
+    || section === "Units"
+    || (section === "Tenants" && tenantMode === "tenancies")
+    || section === "Leases"
+    || section === "Notices"
+    || section === "Rent & Deposits"
+    || section === "Expenses"
+    || section === "Utilities";
+  const showActions = Boolean(onEdit || onReverse || onReceipt || onLeaseStatus || onMoveOut || onDownload);
   if (!rows.length) return null;
   return (
-    <div className="landlord-record-list">
-      {rows.map((row, index) => {
+    <div className="landlord-record-table-wrap">
+      <table className={`landlord-record-table${showAmount ? " has-amount" : ""}${showStatus ? " has-status" : ""}${showActions ? " has-actions" : ""}`}>
+        <thead>
+          <tr>
+            <th scope="col">{recordHeading}</th>
+            <th scope="col">Details</th>
+            {showAmount && <th scope="col">{amountHeading}</th>}
+            {showStatus && <th scope="col">Status</th>}
+            {showActions && <th scope="col"><span className="visually-hidden">Actions</span></th>}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, index) => {
         const id = typeof row.id === "string" ? row.id : `${section}-${index}`;
         const status = stringValue(row.status ?? row.deliveryStatus ?? row.documentStatus, "");
+        const displayStatus = status || (
+          section === "Expenses" || section === "Utilities"
+            ? row.reversedAt ? "REVERSED" : "POSTED"
+            : ""
+        );
         const lines: Array<[string, string]> = [];
         const add = (label: string, value: unknown) => {
           if (value !== undefined && value !== null && value !== "") {
@@ -1293,6 +1820,7 @@ function RecordList({
           heading = stringValue(row.name);
           detail = stringValue(row.address);
           add("Type", row.type);
+          add("Owner", nested(row, "propertyOwner", "name"));
           add("Units", nested(row, "_count", "units"));
         } else if (section === "Units") {
           heading = `${stringValue(nested(row, "property", "name"))} · ${stringValue(row.unitNumber)}`;
@@ -1344,7 +1872,6 @@ function RecordList({
           heading = `${stringValue(nested(row, "tenancy", "tenant", "legalName"))} · ${stringValue(nested(row, "tenancy", "unit", "unitNumber"))}`;
           detail = `${stringValue(nested(row, "tenancy", "unit", "property", "name"))} · held ${formatAmount(row.heldBalance, currency)}`;
           add("Required", formatAmount(row.requiredAmount, currency));
-          add("Status", row.status);
           amountValue = undefined;
         } else if (section === "Expenses") {
           heading = `${stringValue(row.category)} · ${stringValue(nested(row, "property", "name"))}`;
@@ -1375,30 +1902,47 @@ function RecordList({
         }
 
         return (
-          <article className="landlord-record-card" key={id}>
-            <div className="landlord-record-main">
-              <b>{heading}</b>
-              {detail && <span>{detail}</span>}
-              {!!lines.length && <small>{lines.map(([label, value]) => `${label}: ${value}`).join(" · ")}</small>}
-              {section === "Rent & Deposits" && rentMode === "payments" && Boolean(row.reversedAt) && (
-                <small className="landlord-reversal-note">Reversed: {stringValue(row.reversalReason)}</small>
-              )}
-              {section === "Expenses" && Boolean(row.reversedAt) && (
-                <small className="landlord-reversal-note">Reversed: {stringValue(row.reversalReason)}</small>
-              )}
-              {section === "Utilities" && Boolean(row.reversedAt) && (
-                <small className="landlord-reversal-note">Reversed: {stringValue(row.reversalReason)}</small>
-              )}
-              {section === "Rent & Deposits" && rentMode === "deposits" && Array.isArray(row.transactions) && (
-                <small>{row.transactions.map((transaction) => `${stringValue(nested(transaction, "type"))} ${formatAmount(nested(transaction, "amount"), currency)} (${dateLabel(nested(transaction, "date"))})`).join(" · ")}</small>
-              )}
-              {section === "Inspections" && Array.isArray(row.items) && row.items.map((item, itemIndex) => (
-                <small key={`${id}-item-${itemIndex}`}>{stringValue(nested(item, "area"))}: {stringValue(nested(item, "condition"))}{nested(item, "notes") ? ` — ${stringValue(nested(item, "notes"))}` : ""}</small>
-              ))}
-            </div>
-            <div className="landlord-record-actions">
-              {amountValue !== undefined && <strong>{formatAmount(amountValue, currency)}</strong>}
-              {status && <span className={`landlord-status-pill status-${status.toLowerCase()}`}>{status.replaceAll("_", " ")}</span>}
+          <tr key={id}>
+            <td>
+              <div className="landlord-record-main">
+                <b>{heading}</b>
+                {detail && <span>{detail}</span>}
+              </div>
+            </td>
+            <td>
+              <div className="landlord-record-details">
+                {lines.map(([label, value]) => <small key={label}>{label}: {value}</small>)}
+                {section === "Rent & Deposits" && rentMode === "payments" && Boolean(row.reversedAt) && (
+                  <small className="landlord-reversal-note">Reversed: {stringValue(row.reversalReason)}</small>
+                )}
+                {section === "Expenses" && Boolean(row.reversedAt) && (
+                  <small className="landlord-reversal-note">Reversed: {stringValue(row.reversalReason)}</small>
+                )}
+                {section === "Utilities" && Boolean(row.reversedAt) && (
+                  <small className="landlord-reversal-note">Reversed: {stringValue(row.reversalReason)}</small>
+                )}
+                {section === "Rent & Deposits" && rentMode === "deposits" && Array.isArray(row.transactions) && (
+                  <small>{row.transactions.map((transaction) => `${stringValue(nested(transaction, "type"))} ${formatAmount(nested(transaction, "amount"), currency)} (${dateLabel(nested(transaction, "date"))})`).join(" · ")}</small>
+                )}
+                {section === "Inspections" && Array.isArray(row.items) && row.items.map((item, itemIndex) => (
+                  <small key={`${id}-item-${itemIndex}`}>{stringValue(nested(item, "area"))}: {stringValue(nested(item, "condition"))}{nested(item, "notes") ? ` — ${stringValue(nested(item, "notes"))}` : ""}</small>
+                ))}
+              </div>
+            </td>
+            {showAmount && (
+              <td className="landlord-record-amount">
+                {amountValue !== undefined ? formatAmount(amountValue, currency) : "—"}
+              </td>
+            )}
+            {showStatus && (
+              <td>
+                {displayStatus
+                  ? <span className={`landlord-status-pill status-${displayStatus.toLowerCase()}`}>{displayStatus.replaceAll("_", " ")}</span>
+                  : "—"}
+              </td>
+            )}
+            {showActions && <td>
+              <div className="landlord-record-actions">
               {onEdit && typeof row.id === "string" && (
                 <button className="landlord-text-action" type="button" onClick={() => onEdit(row)}>Edit</button>
               )}
@@ -1448,9 +1992,12 @@ function RecordList({
                   </button>
                 )}
             </div>
-          </article>
+            </td>}
+          </tr>
         );
       })}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -1482,36 +2029,59 @@ function MaintenanceList({
   rows,
   members,
   onUpdate,
+  requestText,
+  role,
 }: {
   rows: ValueRecord[];
   members: ValueRecord[];
   onUpdate?: (row: ValueRecord, status: string, changes?: ValueRecord, invoice?: File) => void;
+  requestText: (request: TextRequest) => Promise<string | null>;
+  role: string;
 }) {
   const [invoiceFiles, setInvoiceFiles] = useState<Record<string, File>>({});
-  const nextStatus: Record<string, string[]> = {
+  const nextStatus: Record<string, string[]> = role === "MAINTENANCE_STAFF"
+    ? { ASSIGNED: ["IN_PROGRESS"], IN_PROGRESS: ["COMPLETED"] }
+    : {
     SUBMITTED: ["APPROVED", "ASSIGNED", "REJECTED"],
     APPROVED: ["ASSIGNED", "IN_PROGRESS", "REJECTED"],
     ASSIGNED: ["IN_PROGRESS", "REJECTED"],
     IN_PROGRESS: ["COMPLETED", "REJECTED"],
     COMPLETED: [],
     REJECTED: [],
-  };
+    };
   if (!rows.length) return null;
   return (
-    <div className="landlord-record-list">
-      {rows.map((row, index) => {
+    <div className="landlord-record-table-wrap">
+      <table className="landlord-record-table landlord-maintenance-table">
+        <thead>
+          <tr>
+            <th scope="col">Request</th>
+            <th scope="col">Details</th>
+            <th scope="col">Status</th>
+            <th scope="col">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, index) => {
         const status = stringValue(row.status);
         return (
-          <article className="landlord-record-card" key={stringValue(row.id, String(index))}>
-            <div className="landlord-record-main">
-              <b>{stringValue(row.category)} · {stringValue(nested(row, "unit", "unitNumber"))}</b>
-              <span>{stringValue(row.description)}</span>
-              <small>{stringValue(row.priority)} · {dateLabel(row.createdAt)} · Assigned to: {stringValue(row.assignedToUserId, "unassigned")}</small>
-              {Boolean(row.resolutionNotes) && <small>Resolution: {stringValue(row.resolutionNotes)}</small>}
-            </div>
-            <div className="landlord-record-actions">
-              <span className={`landlord-status-pill status-${status.toLowerCase()}`}>{status.replaceAll("_", " ")}</span>
-              {onUpdate && (
+          <tr key={stringValue(row.id, String(index))}>
+            <td>
+              <div className="landlord-record-main">
+                <b>{stringValue(row.category)} · {stringValue(nested(row, "unit", "unitNumber"))}</b>
+                <span>{stringValue(row.description)}</span>
+              </div>
+            </td>
+            <td>
+              <div className="landlord-record-details">
+                <small>{stringValue(row.priority)} · {dateLabel(row.createdAt)} · Assigned to: {stringValue(row.assignedToUserId, "unassigned")}</small>
+                {Boolean(row.resolutionNotes) && <small>Resolution: {stringValue(row.resolutionNotes)}</small>}
+              </div>
+            </td>
+            <td><span className={`landlord-status-pill status-${status.toLowerCase()}`}>{status.replaceAll("_", " ")}</span></td>
+            <td>
+              <div className="landlord-record-actions">
+              {onUpdate && role !== "MAINTENANCE_STAFF" && (
                 <select
                   aria-label="Assign maintenance request"
                   value=""
@@ -1521,7 +2091,7 @@ function MaintenanceList({
                 >
                   <option value="">Assign to team member</option>
                   {members
-                    .filter((member) => member.status === "ACTIVE" && typeof member.userId === "string")
+                    .filter((member) => member.status === "ACTIVE" && member.role === "MAINTENANCE_STAFF" && typeof member.userId === "string")
                     .map((member) => (
                       <option key={stringValue(member.userId)} value={stringValue(member.userId)}>
                         {stringValue(nested(member, "user", "name"), stringValue(nested(member, "user", "email")))}
@@ -1537,19 +2107,37 @@ function MaintenanceList({
                   {nextStatus[status].map((next) => <option key={next} value={next}>{next.replaceAll("_", " ")}</option>)}
                 </select>
               )}
-              {onUpdate && status !== "COMPLETED" && status !== "REJECTED" && (
+              {onUpdate && role !== "MAINTENANCE_STAFF" && status !== "COMPLETED" && status !== "REJECTED" && (
                 <button
                   className="landlord-text-action"
                   type="button"
-                  onClick={() => {
-                    const estimatedCost = window.prompt("Enter the estimated cost");
+                  onClick={async () => {
+                    if (role === "MAINTENANCE_STAFF") {
+                      const resolutionNotes = await requestText({
+                        title: "Complete maintenance request",
+                        description: "Add a summary of the work completed.",
+                        label: "Resolution notes",
+                      });
+                      if (resolutionNotes !== null) {
+                        onUpdate(row, "COMPLETED", {
+                          ...(resolutionNotes.trim() ? { resolutionNotes: resolutionNotes.trim() } : {}),
+                        });
+                      }
+                      return;
+                    }
+                    const estimatedCost = await requestText({
+                      title: "Set repair estimate",
+                      description: "Enter the estimated cost for this maintenance request.",
+                      label: "Estimated cost",
+                      type: "number",
+                    });
                     if (estimatedCost?.trim()) onUpdate(row, status, { estimatedCost });
                   }}
                 >
                   Set estimate
                 </button>
               )}
-              {onUpdate && status === "IN_PROGRESS" && (
+              {onUpdate && role !== "MAINTENANCE_STAFF" && status === "IN_PROGRESS" && (
                 <>
                   <label className="landlord-field landlord-maintenance-invoice">
                     <span>Invoice (optional)</span>
@@ -1568,18 +2156,26 @@ function MaintenanceList({
                   <button
                     className="landlord-text-action"
                     type="button"
-                    onClick={() => {
-                      const actualCost = window.prompt("Enter the actual cost (required if attaching an invoice)");
-                      if (actualCost === null) return;
+                    onClick={async () => {
                       const invoice = invoiceFiles[stringValue(row.id, "")];
-                      if (invoice && !actualCost.trim()) {
-                        window.alert("Enter an actual cost before attaching the invoice.");
-                        return;
-                      }
-                      const resolutionNotes = window.prompt("Enter resolution notes (optional)") ?? "";
+                      const actualCost = await requestText({
+                        title: "Complete maintenance request",
+                        description: "Enter the final repair cost and resolution details.",
+                        label: "Actual cost",
+                        type: "number",
+                        required: !!invoice,
+                      });
+                      if (actualCost === null) return;
+                      const resolutionNotes = await requestText({
+                        title: "Resolution notes",
+                        description: "Add an optional summary of the completed work.",
+                        label: "Resolution notes",
+                        multiline: true,
+                      });
+                      if (resolutionNotes === null) return;
                       onUpdate(row, "COMPLETED", {
                         ...(actualCost.trim() ? { actualCost: actualCost.trim() } : {}),
-                        ...(resolutionNotes.trim() ? { resolutionNotes: resolutionNotes.trim() } : {}),
+                        ...(resolutionNotes?.trim() ? { resolutionNotes: resolutionNotes.trim() } : {}),
                       }, invoice);
                     }}
                   >
@@ -1588,9 +2184,12 @@ function MaintenanceList({
                 </>
               )}
             </div>
-          </article>
+            </td>
+          </tr>
         );
       })}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -1600,14 +2199,22 @@ function ReportView({
   currency,
   from,
   to,
+  ownerId,
+  owners,
+  canFilterByOwner,
   onDateChange,
+  onOwnerChange,
   onApply,
 }: {
   report: ValueRecord;
   currency: string;
   from: string;
   to: string;
+  ownerId: string;
+  owners: ValueRecord[];
+  canFilterByOwner: boolean;
   onDateChange: (name: string, value: string) => void;
+  onOwnerChange: (value: string) => void;
   onApply: () => void;
 }) {
   const rent = record(report.rent);
@@ -1650,6 +2257,19 @@ function ReportView({
         <button className="dashboard-secondary-button" type="button" onClick={downloadCsv}><ArrowDownToLine size={15} /> Export CSV</button>
       </div>
       <div className="landlord-date-filters">
+        {canFilterByOwner && (
+          <label className="landlord-field">
+            <span>Property owner</span>
+            <select value={ownerId} onChange={(event) => onOwnerChange(event.currentTarget.value)}>
+              <option value="">All owners</option>
+              {owners.map((owner) => (
+                <option key={stringValue(owner.id)} value={stringValue(owner.id)}>
+                  {stringValue(owner.name)}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
         <label className="landlord-field"><span>From</span><input type="date" value={from} onChange={(event) => onDateChange("from", event.currentTarget.value)} /></label>
         <label className="landlord-field"><span>To</span><input type="date" value={to} onChange={(event) => onDateChange("to", event.currentTarget.value)} /></label>
         <button className="dashboard-primary-button" type="button" onClick={onApply}>Apply period</button>
@@ -1703,7 +2323,7 @@ function SubscriptionView({
       </section>
       <section className="landlord-panel landlord-plans-panel">
         <div className="landlord-panel-heading"><div><h2>Choose a plan</h2><p>Proposed Rwanda launch prices; final pricing should be validated before launch.</p></div>
-          <select aria-label="Billing cycle" value={cycle} onChange={(event) => setCycle(event.currentTarget.value)}><option value="MONTHLY">Monthly</option><option value="ANNUAL">Annual</option></select>
+          <label className="landlord-field landlord-billing-cycle"><span>Billing cycle</span><select aria-label="Billing cycle" value={cycle} onChange={(event) => setCycle(event.currentTarget.value)}><option value="MONTHLY">Monthly</option><option value="ANNUAL">Annual</option></select></label>
         </div>
         <div className="landlord-plan-grid">
           {plans.filter((item) => item.slug !== "free-trial").map((item) => (
@@ -1755,9 +2375,9 @@ function SubscriptionView({
                 setPaymentInvoice("");
               }}>
                 <label className="landlord-field"><span>Payment method</span><select value={paymentMethod} onChange={(event) => setPaymentMethod(event.currentTarget.value)}><option value="MOBILE_MONEY">Mobile Money</option><option value="BANK_TRANSFER">Bank transfer</option><option value="CASH">Cash</option><option value="OTHER">Other</option></select></label>
-                <label className="landlord-field"><span>Payment reference</span><input required value={paymentReference} onChange={(event) => setPaymentReference(event.currentTarget.value)} /></label>
-                <label className="landlord-field"><span>Amount ({currency})</span><input required min="0.01" step="0.01" type="number" value={paymentAmount} onChange={(event) => setPaymentAmount(event.currentTarget.value)} /></label>
-                <label className="landlord-field"><span>Proof (PDF or image)</span><input required accept="application/pdf,image/jpeg,image/png,image/webp" type="file" onChange={(event) => setPaymentProof(event.currentTarget.files?.[0] ?? null)} /></label>
+                <label className="landlord-field"><span>Payment reference <i aria-hidden="true"> *</i></span><input required value={paymentReference} onChange={(event) => setPaymentReference(event.currentTarget.value)} /></label>
+                <label className="landlord-field"><span>Amount ({currency}) <i aria-hidden="true"> *</i></span><input required min="0.01" step="0.01" type="number" value={paymentAmount} onChange={(event) => setPaymentAmount(event.currentTarget.value)} /></label>
+                <label className="landlord-field"><span>Proof (PDF or image) <i aria-hidden="true"> *</i></span><input required accept="application/pdf,image/jpeg,image/png,image/webp" type="file" onChange={(event) => setPaymentProof(event.currentTarget.files?.[0] ?? null)} /></label>
                 <button className="dashboard-primary-button" disabled={saving} type="submit">{saving ? "Submitting…" : "Submit for verification"}</button>
               </form>
             )}

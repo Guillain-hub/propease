@@ -26,8 +26,9 @@ npm run api:dev
 
 The API listens on `http://localhost:4000` with the `/api/v1` prefix. The
 database-backed health endpoint is `GET /api/v1/health`. Root-level scripts
-`npm run api:build`, `npm run api:dev`, and `npm run db:generate` are also
-available.
+`npm run api:build`, `npm run api:dev`, `npm run db:generate`, and
+`npm run dev:all` are also available. `npm run dev:all` starts the Next.js
+frontend and API together; PostgreSQL and Redis must still be reachable.
 
 The Next.js login and registration forms call
 `http://localhost:4000/api/v1/auth` by default and send authentication cookies
@@ -67,6 +68,19 @@ after changing `APP_ORIGINS`.
 - Landlord reads and writes are scoped to active organisation membership.
   Subscription enforcement provides a 14-day trial, a three-day grace period,
   read-only access for 30 further days, and plan unit limits.
+- Organisation memberships support owner, administrator, property manager,
+  accountant, and maintenance staff roles. Managers are limited to assigned
+  properties, accountants can manage organisation-wide financial workflows,
+  and maintenance staff can view their assigned requests and update progress.
+  Legacy `STAFF` memberships are restricted until an owner or administrator
+  assigns a specific role.
+- Properties can be linked to one organisation-specific property-owner record.
+  Owner-filtered reports use property allocations, and managers can be assigned
+  to multiple properties. The ownership migration backfills records from the
+  previous user-based property owner where possible.
+- File access follows the organisation role: managers can download files
+  linked to assigned properties, accountants can download financial evidence,
+  and only owners, administrators, managers, and accountants can upload files.
 - Rent payments and expense/utility reversals are recorded in the ledger and
   audit history; manually entered payments are clearly identified as
   unverified. Maintenance actual costs create linked expense records.
@@ -120,3 +134,18 @@ repository or `.env.example`. Configure `S3_BUCKET` as a private bucket with
 block-public-access enabled and a CORS policy allowing the web app to `PUT`
 objects with the signed `Content-Type` header. Set `EMAIL_FROM_ADDRESS` to an
 SES-verified sender before enabling queued email delivery.
+
+When connecting to Supabase from an IPv4-only network, use the project's
+session pooler connection details rather than its direct database host. Set
+`DATABASE_URL` in the private `apps/api/.env` file using the session pooler
+host and user shown in Supabase's database settings:
+
+```text
+postgresql://postgres.<project-ref>:<url-encoded-password>@aws-1-eu-central-1.pooler.supabase.com:5432/postgres?sslmode=require&schema=public&connection_limit=1
+```
+
+URL-encode special characters in the database password. Keep the actual
+connection string private; never commit it or share it in logs. The direct
+Supabase database host may require IPv6 connectivity.
+The API caps Prisma at one connection per process and retries temporary
+session-pooler capacity errors during startup.

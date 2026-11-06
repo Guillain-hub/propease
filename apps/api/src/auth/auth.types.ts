@@ -1,3 +1,5 @@
+import type { MembershipRole } from '@prisma/client';
+
 export interface AccessTokenClaims {
   sub: string;
   sid: string;
@@ -8,7 +10,7 @@ declare global {
   namespace Express {
     interface Request {
       user?: AccessTokenClaims;
-      organisationRole?: 'OWNER' | 'ADMIN' | 'MANAGER' | 'STAFF';
+      organisationRole?: MembershipRole;
       cookies?: Record<string, string | undefined>;
     }
   }
