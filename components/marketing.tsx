@@ -1,7 +1,6 @@
 import Link from "next/link";
 import Image from "next/image";
 import {
-  ArrowDownRight,
   ArrowRight,
   ArrowUpRight,
   Bell,
@@ -14,7 +13,6 @@ import {
   FileText,
   KeyRound,
   LayoutDashboard,
-  MessageSquareText,
   Plus,
   Wrench,
 } from "lucide-react";
@@ -156,96 +154,6 @@ export function PrimaryCta({
   );
 }
 
-const benefits: { icon: LucideIcon; title: string; text: string; tone: string }[] = [
-  { icon: Building2, title: "Property management", text: "Manage properties and rental units in one organised workspace.", tone: "mint" },
-  { icon: KeyRound, title: "Tenant management", text: "Keep tenant details, tenancy records and agreements together.", tone: "blue" },
-  { icon: CircleDollarSign, title: "Rent tracking", text: "Monitor rent charges, recorded payments, deposits and balances.", tone: "peach" },
-  { icon: ClipboardCheck, title: "Maintenance & inspections", text: "Record requests and document property conditions over time.", tone: "lilac" },
-];
-
-export function HomeBenefits() {
-  return (
-    <section className="section section-soft">
-      <div className="container">
-        <div className="section-heading">
-          <SectionEyebrow>LESS ADMIN, MORE CLARITY</SectionEyebrow>
-          <h2>A better-managed property<br className="desktop-break" /> starts with a clearer picture.</h2>
-          <p>Good property management is in the details. PropEase helps you keep the important ones in reach.</p>
-        </div>
-        <div className="benefit-grid">
-          {benefits.map(({ icon: Icon, title, text, tone }, index) => (
-            <article className="benefit-card" key={title}>
-              <span className={`benefit-icon ${tone}`}><Icon size={21} strokeWidth={1.8} /></span>
-              <span className="card-index">0{index + 1}</span>
-              <h3>{title}</h3><p>{text}</p>
-              <ArrowDownRight className="benefit-arrow" size={18} />
-            </article>
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
-
-export function HomeHowItWorks() {
-  const steps = [
-    ["01", "Set up your space", "Create your account, add your properties and organise your rental units.", Building2],
-    ["02", "Add tenants & leases", "Keep tenant profiles, tenancy details and lease records connected.", FileText],
-    ["03", "Stay on top of it", "Track rent, inspections, expenses and maintenance as things happen.", ClipboardCheck],
-  ] as const;
-  return (
-    <section className="section">
-      <div className="container">
-        <div className="section-heading">
-          <SectionEyebrow>HOW IT WORKS</SectionEyebrow>
-          <h2>Up and running,<br className="desktop-break" /> without the runaround.</h2>
-          <p>A straightforward workflow that helps you move from scattered records to a more organised day.</p>
-        </div>
-        <div className="steps-grid">
-          {steps.map(([number, title, text, Icon]) => (
-            <article className="step-card" key={number}>
-              <div className="step-top"><span>{number}</span><Icon size={21} /></div>
-              <div className="step-line"><i /></div>
-              <h3>{title}</h3><p>{text}</p>
-            </article>
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
-
-export function HomeFeaturePreview() {
-  const items = [
-    [Building2, "Properties & units", "See properties, units and availability at a glance.", "mint"],
-    [FileText, "Leases & documents", "Keep agreements and tenancy records easy to find.", "blue"],
-    [CircleDollarSign, "Rent records", "Record charges and payments, and follow up on balances.", "peach"],
-    [MessageSquareText, "Maintenance", "Follow a request from first report to completion.", "lilac"],
-  ] as const;
-  return (
-    <section className="section section-soft">
-      <div className="container feature-preview-layout">
-        <div className="feature-preview-copy">
-          <SectionEyebrow>MADE FOR THE DETAILS</SectionEyebrow>
-          <h2>Everything in its place.<br />Nothing falling through.</h2>
-          <p>From the first tenant record to a maintenance update, your essential property workflows stay connected and easy to follow.</p>
-          <Link className="text-link" href="/features">Explore all features <ArrowRight size={16} /></Link>
-          <div className="feature-note"><span className="feature-note-icon"><Check size={16} /></span><span><b>Built around your workflow</b><small>Practical tools for everyday property operations.</small></span></div>
-        </div>
-        <div className="feature-preview-grid">
-          {items.map(([Icon, title, text, tone]) => (
-            <article className="feature-mini-card" key={title}>
-              <span className={`benefit-icon ${tone}`}><Icon size={19} /></span>
-              <h3>{title}</h3><p>{text}</p>
-              <Link className="mini-card-link" href="/features">Learn more <ArrowUpRight size={13} /></Link>
-            </article>
-          ))}
-        </div>
-      </div>
-    </section>
-  );
-}
-
 export function HomeHero() {
   return (
     <section className="hero-section">
@@ -254,15 +162,15 @@ export function HomeHero() {
       </div>
       <div className="container hero-container">
         <div className="hero-copy">
-          <h1>Manage properties with <span>clarity.</span></h1>
-          <p>PropEase helps landlords and property managers organise properties, manage tenants and leases, track rent, document inspections and handle maintenance — all in one place.</p>
+          <h1>Manage properties with <span>Ease.</span></h1>
+          <p>PropEase helps landlords and property managers organise properties, manage tenants and leases, track rent, document inspections and handle maintenance all in one place.</p>
           <div className="hero-actions">
             <Link className="button button-primary button-large" href="/register">Get started <ArrowUpRight size={17} /></Link>
             <Link className="button button-outline button-large" href="/features">Explore features <ArrowRight size={16} /></Link>
           </div>
-          <div className="hero-proof"><span className="proof-mark"><Check size={13} /></span><span>Built for the way property is managed in Rwanda</span></div>
+      
         </div>
-        <div className="hero-scroll"><span>ONE CLEARER VIEW</span><div /></div>
+        
       </div>
     </section>
   );
@@ -271,10 +179,7 @@ export function HomeHero() {
 export function TrustStrip() {
   return (
     <section className="trust-strip">
-      <div className="container trust-inner">
-        <span>PROPERTY OPERATIONS, SIMPLIFIED</span>
-        <p>One place for <b>properties</b><i /> <b>tenants</b><i /> <b>rent records</b><i /> <b>maintenance</b></p>
-      </div>
+      
     </section>
   );
 }

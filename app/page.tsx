@@ -1,10 +1,7 @@
 import type { Metadata } from "next";
 import {
   DashboardPreview,
-  HomeBenefits,
-  HomeFeaturePreview,
   HomeHero,
-  HomeHowItWorks,
   PrimaryCta,
   TrustStrip,
 } from "@/components/marketing";
@@ -31,21 +28,9 @@ export default function HomePage() {
               <DashboardPreview manager />
             </div>
           </div>
-          <div className="capabilities-panel">
-            <div className="capabilities-heading">
-              <span>MADE FOR</span>
-            </div>
-            <ul className="capabilities-list" aria-label="Who PropEase is made for">
-              <li>Landlords</li>
-              <li>Property management companies</li>
-            </ul>
-          </div>
         </div>
       </section>
       <TrustStrip />
-      <HomeBenefits />
-      <HomeHowItWorks />
-      <HomeFeaturePreview />
       <div className="container"><PrimaryCta /></div>
     </div>
   );
