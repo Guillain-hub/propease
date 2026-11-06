@@ -141,9 +141,11 @@ session pooler connection details rather than its direct database host. Set
 host and user shown in Supabase's database settings:
 
 ```text
-postgresql://postgres.<project-ref>:<url-encoded-password>@aws-1-eu-central-1.pooler.supabase.com:5432/postgres?sslmode=require&schema=public
+postgresql://postgres.<project-ref>:<url-encoded-password>@aws-1-eu-central-1.pooler.supabase.com:5432/postgres?sslmode=require&schema=public&connection_limit=1
 ```
 
 URL-encode special characters in the database password. Keep the actual
 connection string private; never commit it or share it in logs. The direct
 Supabase database host may require IPv6 connectivity.
+The API caps Prisma at one connection per process and retries temporary
+session-pooler capacity errors during startup.
