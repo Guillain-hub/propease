@@ -34,6 +34,8 @@ import {
   NoticeInput,
   OrganisationSettingsInput,
   PaymentInput,
+  PropertyOwnerInput,
+  PropertyOwnerUpdateInput,
   PropertyInput,
   PropertyUpdateInput,
   ReversalInput,
@@ -48,6 +50,7 @@ import {
   UtilityInput,
 } from './dto/landlord.dto.js';
 import { LandlordService } from './landlord.service.js';
+import { LandlordPermissionsGuard } from './landlord-permissions.guard.js';
 import { LandlordSubscriptionGuard } from './landlord-subscription.guard.js';
 import { ReportQuery, SelectPlanInput } from './dto/landlord-query.dto.js';
 
@@ -56,7 +59,12 @@ function actorRole(request: Request): MembershipRole | undefined {
 }
 
 @Controller('organisations/:organisationId/landlord')
-@UseGuards(JwtAccessGuard, OrganisationAccessGuard, LandlordSubscriptionGuard)
+@UseGuards(
+  JwtAccessGuard,
+  OrganisationAccessGuard,
+  LandlordSubscriptionGuard,
+  LandlordPermissionsGuard,
+)
 export class LandlordController {
   constructor(
     private readonly landlord: LandlordService,
@@ -64,13 +72,58 @@ export class LandlordController {
   ) {}
 
   @Get()
-  dashboard(@Param('organisationId', ParseUUIDPipe) organisationId: string) {
-    return this.landlord.dashboard(organisationId);
+  dashboard(
+    @Param('organisationId', ParseUUIDPipe) organisationId: string,
+    @CurrentUser() user: AccessTokenClaims,
+    @Req() request: Request,
+  ) {
+    return this.landlord.dashboard(organisationId, actorRole(request), user.sub);
   }
 
   @Get('properties')
-  listProperties(@Param('organisationId', ParseUUIDPipe) organisationId: string) {
-    return this.landlord.listProperties(organisationId);
+  listProperties(
+    @Param('organisationId', ParseUUIDPipe) organisationId: string,
+    @CurrentUser() user: AccessTokenClaims,
+    @Req() request: Request,
+  ) {
+    return this.landlord.listProperties(organisationId, actorRole(request), user.sub);
+  }
+
+  @Get('property-owners')
+  listPropertyOwners(@Param('organisationId', ParseUUIDPipe) organisationId: string) {
+    return this.landlord.listPropertyOwners(organisationId);
+  }
+
+  @Post('property-owners')
+  createPropertyOwner(
+    @Param('organisationId', ParseUUIDPipe) organisationId: string,
+    @CurrentUser() user: AccessTokenClaims,
+    @Req() request: Request,
+    @Body() input: PropertyOwnerInput,
+  ) {
+    return this.landlord.createPropertyOwner(
+      organisationId,
+      user.sub,
+      actorRole(request),
+      input,
+    );
+  }
+
+  @Patch('property-owners/:ownerId')
+  updatePropertyOwner(
+    @Param('organisationId', ParseUUIDPipe) organisationId: string,
+    @Param('ownerId', ParseUUIDPipe) ownerId: string,
+    @CurrentUser() user: AccessTokenClaims,
+    @Req() request: Request,
+    @Body() input: PropertyOwnerUpdateInput,
+  ) {
+    return this.landlord.updatePropertyOwner(
+      organisationId,
+      user.sub,
+      actorRole(request),
+      ownerId,
+      input,
+    );
   }
 
   @Post('properties')
@@ -101,8 +154,12 @@ export class LandlordController {
   }
 
   @Get('units')
-  listUnits(@Param('organisationId', ParseUUIDPipe) organisationId: string) {
-    return this.landlord.listUnits(organisationId);
+  listUnits(
+    @Param('organisationId', ParseUUIDPipe) organisationId: string,
+    @CurrentUser() user: AccessTokenClaims,
+    @Req() request: Request,
+  ) {
+    return this.landlord.listUnits(organisationId, actorRole(request), user.sub);
   }
 
   @Post('properties/:propertyId/units')
@@ -134,8 +191,12 @@ export class LandlordController {
   }
 
   @Get('tenants')
-  listTenants(@Param('organisationId', ParseUUIDPipe) organisationId: string) {
-    return this.landlord.listTenants(organisationId);
+  listTenants(
+    @Param('organisationId', ParseUUIDPipe) organisationId: string,
+    @CurrentUser() user: AccessTokenClaims,
+    @Req() request: Request,
+  ) {
+    return this.landlord.listTenants(organisationId, actorRole(request), user.sub);
   }
 
   @Post('tenants')
@@ -166,8 +227,12 @@ export class LandlordController {
   }
 
   @Get('tenancies')
-  listTenancies(@Param('organisationId', ParseUUIDPipe) organisationId: string) {
-    return this.landlord.listTenancies(organisationId);
+  listTenancies(
+    @Param('organisationId', ParseUUIDPipe) organisationId: string,
+    @CurrentUser() user: AccessTokenClaims,
+    @Req() request: Request,
+  ) {
+    return this.landlord.listTenancies(organisationId, actorRole(request), user.sub);
   }
 
   @Post('tenancies')
@@ -192,8 +257,12 @@ export class LandlordController {
   }
 
   @Get('leases')
-  listLeases(@Param('organisationId', ParseUUIDPipe) organisationId: string) {
-    return this.landlord.listLeases(organisationId);
+  listLeases(
+    @Param('organisationId', ParseUUIDPipe) organisationId: string,
+    @CurrentUser() user: AccessTokenClaims,
+    @Req() request: Request,
+  ) {
+    return this.landlord.listLeases(organisationId, actorRole(request), user.sub);
   }
 
   @Post('leases')
@@ -241,8 +310,12 @@ export class LandlordController {
   }
 
   @Get('inspections')
-  listInspections(@Param('organisationId', ParseUUIDPipe) organisationId: string) {
-    return this.landlord.listInspections(organisationId);
+  listInspections(
+    @Param('organisationId', ParseUUIDPipe) organisationId: string,
+    @CurrentUser() user: AccessTokenClaims,
+    @Req() request: Request,
+  ) {
+    return this.landlord.listInspections(organisationId, actorRole(request), user.sub);
   }
 
   @Post('inspections')
@@ -273,8 +346,12 @@ export class LandlordController {
   }
 
   @Get('rent/charges')
-  listCharges(@Param('organisationId', ParseUUIDPipe) organisationId: string) {
-    return this.landlord.listCharges(organisationId);
+  listCharges(
+    @Param('organisationId', ParseUUIDPipe) organisationId: string,
+    @CurrentUser() user: AccessTokenClaims,
+    @Req() request: Request,
+  ) {
+    return this.landlord.listCharges(organisationId, actorRole(request), user.sub);
   }
 
   @Post('rent/charges')
@@ -305,8 +382,12 @@ export class LandlordController {
   }
 
   @Get('rent/payments')
-  listPayments(@Param('organisationId', ParseUUIDPipe) organisationId: string) {
-    return this.landlord.listPayments(organisationId);
+  listPayments(
+    @Param('organisationId', ParseUUIDPipe) organisationId: string,
+    @CurrentUser() user: AccessTokenClaims,
+    @Req() request: Request,
+  ) {
+    return this.landlord.listPayments(organisationId, actorRole(request), user.sub);
   }
 
   @Post('rent/payments')
@@ -379,8 +460,12 @@ export class LandlordController {
   }
 
   @Get('rent/deposits')
-  listDeposits(@Param('organisationId', ParseUUIDPipe) organisationId: string) {
-    return this.landlord.listDeposits(organisationId);
+  listDeposits(
+    @Param('organisationId', ParseUUIDPipe) organisationId: string,
+    @CurrentUser() user: AccessTokenClaims,
+    @Req() request: Request,
+  ) {
+    return this.landlord.listDeposits(organisationId, actorRole(request), user.sub);
   }
 
   @Post('rent/deposits/:depositId/transactions')
@@ -401,8 +486,12 @@ export class LandlordController {
   }
 
   @Get('expenses')
-  listExpenses(@Param('organisationId', ParseUUIDPipe) organisationId: string) {
-    return this.landlord.listExpenses(organisationId);
+  listExpenses(
+    @Param('organisationId', ParseUUIDPipe) organisationId: string,
+    @CurrentUser() user: AccessTokenClaims,
+    @Req() request: Request,
+  ) {
+    return this.landlord.listExpenses(organisationId, actorRole(request), user.sub);
   }
 
   @Post('expenses')
@@ -450,8 +539,12 @@ export class LandlordController {
   }
 
   @Get('utilities')
-  listUtilities(@Param('organisationId', ParseUUIDPipe) organisationId: string) {
-    return this.landlord.listUtilities(organisationId);
+  listUtilities(
+    @Param('organisationId', ParseUUIDPipe) organisationId: string,
+    @CurrentUser() user: AccessTokenClaims,
+    @Req() request: Request,
+  ) {
+    return this.landlord.listUtilities(organisationId, actorRole(request), user.sub);
   }
 
   @Post('utilities')
@@ -499,8 +592,12 @@ export class LandlordController {
   }
 
   @Get('maintenance')
-  listMaintenance(@Param('organisationId', ParseUUIDPipe) organisationId: string) {
-    return this.landlord.listMaintenance(organisationId);
+  listMaintenance(
+    @Param('organisationId', ParseUUIDPipe) organisationId: string,
+    @CurrentUser() user: AccessTokenClaims,
+    @Req() request: Request,
+  ) {
+    return this.landlord.listMaintenance(organisationId, actorRole(request), user.sub);
   }
 
   @Post('maintenance')
@@ -531,8 +628,12 @@ export class LandlordController {
   }
 
   @Get('notices')
-  listNotices(@Param('organisationId', ParseUUIDPipe) organisationId: string) {
-    return this.landlord.listNotices(organisationId);
+  listNotices(
+    @Param('organisationId', ParseUUIDPipe) organisationId: string,
+    @CurrentUser() user: AccessTokenClaims,
+    @Req() request: Request,
+  ) {
+    return this.landlord.listNotices(organisationId, actorRole(request), user.sub);
   }
 
   @Post('notices')
@@ -549,8 +650,17 @@ export class LandlordController {
   financialReport(
     @Param('organisationId', ParseUUIDPipe) organisationId: string,
     @Query() query: ReportQuery,
+    @CurrentUser() user: AccessTokenClaims,
+    @Req() request: Request,
   ) {
-    return this.landlord.getFinancialReport(organisationId, query.from, query.to);
+    return this.landlord.getFinancialReport(
+      organisationId,
+      query.from,
+      query.to,
+      query.ownerId,
+      actorRole(request),
+      user.sub,
+    );
   }
 
   @Get('team')

@@ -1,8 +1,10 @@
 import {
   BadRequestException,
+  ForbiddenException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { MembershipRole } from '@prisma/client';
 import { ConfigService } from '@nestjs/config';
 import {
   DeleteObjectCommand,
@@ -163,9 +165,96 @@ export class ObjectStorageService {
     organisationId: string,
     userId: string,
     fileId: string,
+    role?: MembershipRole,
   ): Promise<{ downloadUrl: string; expiresIn: number }> {
+    if (
+      role !== MembershipRole.OWNER &&
+      role !== MembershipRole.ADMIN &&
+      role !== MembershipRole.MANAGER &&
+      role !== MembershipRole.ACCOUNTANT
+    ) {
+      throw new ForbiddenException('Your organisation role cannot download files');
+    }
+
+    const assignedProperty = {
+      organisationId,
+      assignments: { some: { userId } },
+    };
     const file = await this.prisma.storedFile.findFirst({
-      where: { id: fileId, organisationId, uploadStatus: 'UPLOADED' },
+      where: {
+        id: fileId,
+        organisationId,
+        uploadStatus: 'UPLOADED',
+        ...(role === MembershipRole.MANAGER
+          ? {
+              OR: [
+                {
+                  leaseDocuments: {
+                    some: {
+                      lease: {
+                        tenancy: {
+                          unit: { property: assignedProperty },
+                        },
+                      },
+                    },
+                  },
+                },
+                {
+                  inspectionMedia: {
+                    some: {
+                      inspection: {
+                        unit: { property: assignedProperty },
+                      },
+                    },
+                  },
+                },
+                {
+                  expenseEvidence: {
+                    some: { property: assignedProperty },
+                  },
+                },
+                {
+                  utilityEvidence: {
+                    some: { property: assignedProperty },
+                  },
+                },
+                {
+                  maintenanceInvoices: {
+                    some: {
+                      request: {
+                        unit: { property: assignedProperty },
+                      },
+                    },
+                  },
+                },
+              ],
+            }
+          : role === MembershipRole.ACCOUNTANT
+            ? {
+                OR: [
+                  {
+                    expenseEvidence: {
+                      some: { property: { organisationId } },
+                    },
+                  },
+                  {
+                    utilityEvidence: {
+                      some: { property: { organisationId } },
+                    },
+                  },
+                  {
+                    maintenanceInvoices: {
+                      some: {
+                        request: {
+                          unit: { property: { organisationId } },
+                        },
+                      },
+                    },
+                  },
+                ],
+              }
+            : {}),
+      },
       select: { storageKey: true, fileName: true },
     });
     if (!file) {

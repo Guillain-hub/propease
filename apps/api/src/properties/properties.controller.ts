@@ -25,9 +25,25 @@ export class PropertiesController {
   constructor(private readonly prisma: PrismaService) {}
 
   @Get()
-  async list(@Param('organisationId', ParseUUIDPipe) organisationId: string) {
+  async list(
+    @Param('organisationId', ParseUUIDPipe) organisationId: string,
+    @Req() request: Request,
+  ) {
+    const role = request.organisationRole;
+    if (
+      role !== MembershipRole.OWNER &&
+      role !== MembershipRole.ADMIN &&
+      role !== MembershipRole.MANAGER
+    ) {
+      throw new ForbiddenException('Your organisation role cannot view properties');
+    }
     const properties = await this.prisma.property.findMany({
-      where: { organisationId },
+      where: {
+        organisationId,
+        ...(role === MembershipRole.MANAGER && request.user?.sub
+          ? { assignments: { some: { userId: request.user.sub } } }
+          : {}),
+      },
       select: {
         id: true,
         name: true,
@@ -35,6 +51,7 @@ export class PropertiesController {
         address: true,
         status: true,
         createdAt: true,
+        propertyOwner: { select: { id: true, name: true } },
         _count: { select: { units: true } },
       },
       orderBy: { createdAt: 'desc' },
@@ -52,8 +69,7 @@ export class PropertiesController {
     const role = request.organisationRole;
     if (
       role !== MembershipRole.OWNER &&
-      role !== MembershipRole.ADMIN &&
-      role !== MembershipRole.MANAGER
+      role !== MembershipRole.ADMIN
     ) {
       throw new ForbiddenException('Your organisation role cannot create properties');
     }
@@ -95,9 +111,24 @@ export class PropertiesController {
   async getOne(
     @Param('organisationId', ParseUUIDPipe) organisationId: string,
     @Param('propertyId', ParseUUIDPipe) propertyId: string,
+    @Req() request: Request,
   ) {
+    const role = request.organisationRole;
+    if (
+      role !== MembershipRole.OWNER &&
+      role !== MembershipRole.ADMIN &&
+      role !== MembershipRole.MANAGER
+    ) {
+      throw new ForbiddenException('Your organisation role cannot view properties');
+    }
     const property = await this.prisma.property.findFirst({
-      where: { id: propertyId, organisationId },
+      where: {
+        id: propertyId,
+        organisationId,
+        ...(role === MembershipRole.MANAGER && request.user?.sub
+          ? { assignments: { some: { userId: request.user.sub } } }
+          : {}),
+      },
       select: {
         id: true,
         name: true,

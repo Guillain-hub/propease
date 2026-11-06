@@ -91,7 +91,7 @@ export function AuthForm({ mode }: AuthFormProps) {
       {isRegister && (
         <>
           <div className="form-field">
-            <label htmlFor="auth-name">Full name</label>
+            <label htmlFor="auth-name">Full name <span className="required-field-marker" aria-hidden="true">*</span></label>
             <input
               id="auth-name"
               name="name"
@@ -103,7 +103,7 @@ export function AuthForm({ mode }: AuthFormProps) {
             />
           </div>
           <div className="form-field">
-            <label htmlFor="auth-organisation">Organisation name</label>
+            <label htmlFor="auth-organisation">Organisation name <span className="required-field-marker" aria-hidden="true">*</span></label>
             <input
               id="auth-organisation"
               name="organisationName"
@@ -115,7 +115,7 @@ export function AuthForm({ mode }: AuthFormProps) {
             />
           </div>
           <div className="form-field">
-            <label htmlFor="auth-organisation-type">I am a</label>
+            <label htmlFor="auth-organisation-type">I am a <span className="required-field-marker" aria-hidden="true">*</span></label>
             <select
               id="auth-organisation-type"
               name="organisationType"
@@ -131,7 +131,7 @@ export function AuthForm({ mode }: AuthFormProps) {
         </>
       )}
       <div className="form-field">
-        <label htmlFor="auth-email">Email address</label>
+        <label htmlFor="auth-email">Email address <span className="required-field-marker" aria-hidden="true">*</span></label>
         <input
           id="auth-email"
           name="email"
@@ -143,7 +143,7 @@ export function AuthForm({ mode }: AuthFormProps) {
         />
       </div>
       <div className="form-field">
-        <label htmlFor="auth-password">Password</label>
+        <label htmlFor="auth-password">Password <span className="required-field-marker" aria-hidden="true">*</span></label>
         <input
           id="auth-password"
           name="password"

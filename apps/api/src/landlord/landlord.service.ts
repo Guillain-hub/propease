@@ -39,6 +39,8 @@ import {
   NoticeInput,
   OrganisationSettingsInput,
   PaymentInput,
+  PropertyOwnerInput,
+  PropertyOwnerUpdateInput,
   PropertyInput,
   PropertyUpdateInput,
   ReversalInput,
@@ -58,11 +60,84 @@ const managers = new Set<MembershipRole>([
   MembershipRole.OWNER,
   MembershipRole.ADMIN,
   MembershipRole.MANAGER,
+  MembershipRole.ACCOUNTANT,
+  MembershipRole.MAINTENANCE_STAFF,
+]);
+
+const ownershipManagers = new Set<MembershipRole>([
+  MembershipRole.OWNER,
+  MembershipRole.ADMIN,
+]);
+
+const restrictedAdminGrants = new Set<MembershipRole>([
+  MembershipRole.ADMIN,
+  MembershipRole.ACCOUNTANT,
+  MembershipRole.MAINTENANCE_STAFF,
 ]);
 
 function assertCanManage(role: MembershipRole | undefined): void {
   if (!role || !managers.has(role)) {
     throw new ForbiddenException('Your organisation role cannot make this change');
+  }
+}
+
+function assertCanManageOwnership(role: MembershipRole | undefined): void {
+  if (!role || !ownershipManagers.has(role)) {
+    throw new ForbiddenException('Only organisation owners and administrators can manage property owners');
+  }
+}
+
+function propertyScopeWhere(
+  organisationId: string,
+  role?: MembershipRole,
+  userId?: string,
+): Prisma.PropertyWhereInput {
+  return {
+    organisationId,
+    ...(role === MembershipRole.MANAGER && userId
+      ? { assignments: { some: { userId } } }
+      : {}),
+  };
+}
+
+function tenancyPropertyScope(
+  organisationId: string,
+  role?: MembershipRole,
+  userId?: string,
+): Prisma.TenancyWhereInput {
+  return { unit: { property: propertyScopeWhere(organisationId, role, userId) } };
+}
+
+async function setPropertyAssignments(
+  transaction: Prisma.TransactionClient,
+  organisationId: string,
+  userId: string,
+  role: MembershipRole,
+  propertyIds: string[],
+): Promise<void> {
+  const ids = [...new Set(propertyIds)];
+  if (role === MembershipRole.MANAGER && ids.length === 0) {
+    throw new BadRequestException('Assign at least one property to a property manager');
+  }
+  if (role !== MembershipRole.MANAGER && ids.length > 0) {
+    throw new BadRequestException('Only property managers can receive property assignments');
+  }
+  if (ids.length > 0) {
+    const properties = await transaction.property.findMany({
+      where: { organisationId, id: { in: ids } },
+      select: { id: true },
+    });
+    if (properties.length !== ids.length) {
+      throw new NotFoundException('One or more assigned properties were not found in this organisation');
+    }
+  }
+  await transaction.propertyAssignment.deleteMany({
+    where: { userId, property: { organisationId } },
+  });
+  if (ids.length > 0) {
+    await transaction.propertyAssignment.createMany({
+      data: ids.map((propertyId) => ({ propertyId, userId })),
+    });
   }
 }
 
@@ -110,10 +185,23 @@ function isUniqueConflict(error: unknown): boolean {
 export class LandlordService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async dashboard(organisationId: string) {
+  async dashboard(
+    organisationId: string,
+    role?: MembershipRole,
+    userId?: string,
+  ) {
     await this.prisma.$transaction((transaction) =>
       ensureTrialSubscription(transaction, organisationId),
     );
+    const assignedPropertyIds =
+      role === MembershipRole.MANAGER && userId
+        ? (
+            await this.prisma.propertyAssignment.findMany({
+              where: { userId, property: { organisationId } },
+              select: { propertyId: true },
+            })
+          ).map(({ propertyId }) => propertyId)
+        : undefined;
     const now = new Date();
     const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
     const [
@@ -128,43 +216,83 @@ export class LandlordService {
       upcomingLeases,
       openMaintenance,
       recentAudit,
+      monthlyCollections,
     ] = await Promise.all([
-      this.prisma.property.count({ where: { organisationId, status: 'ACTIVE' } }),
+      this.prisma.property.count({
+        where: { ...propertyScopeWhere(organisationId, role, userId), status: 'ACTIVE' },
+      }),
       this.prisma.unit.groupBy({
         by: ['status'],
-        where: { property: { organisationId } },
+        where: { property: propertyScopeWhere(organisationId, role, userId) },
         _count: { _all: true },
       }),
-      this.prisma.tenant.count({ where: { organisationId } }),
+      this.prisma.tenant.count({
+        where: {
+          organisationId,
+          ...(role === MembershipRole.MANAGER
+            ? {
+                tenancies: {
+                  some: {
+                    unit: {
+                      property: propertyScopeWhere(organisationId, role, userId),
+                    },
+                  },
+                },
+              }
+            : {}),
+        },
+      }),
       this.prisma.tenancy.count({
-        where: { unit: { property: { organisationId } }, status: TenancyStatus.ACTIVE },
+        where: {
+          ...tenancyPropertyScope(organisationId, role, userId),
+          status: TenancyStatus.ACTIVE,
+        },
       }),
       this.prisma.rentCharge.aggregate({
         where: {
-          tenancy: { unit: { property: { organisationId } } },
+          tenancy: tenancyPropertyScope(organisationId, role, userId),
           status: { in: [RentChargeStatus.PENDING, RentChargeStatus.PARTIALLY_PAID, RentChargeStatus.OVERDUE] },
         },
         _sum: { balance: true },
       }),
       this.prisma.rentCharge.aggregate({
         where: {
-          tenancy: { unit: { property: { organisationId } } },
+          tenancy: tenancyPropertyScope(organisationId, role, userId),
           dueDate: { gte: monthStart },
           status: { not: RentChargeStatus.VOID },
         },
         _sum: { amount: true },
       }),
       this.prisma.payment.aggregate({
-        where: { organisationId, reversedAt: null, receivedAt: { gte: monthStart } },
+        where: {
+          organisationId,
+          reversedAt: null,
+          receivedAt: { gte: monthStart },
+          ...(role === MembershipRole.MANAGER
+            ? {
+                allocations: {
+                  some: {
+                    rentCharge: {
+                      tenancy: tenancyPropertyScope(organisationId, role, userId),
+                    },
+                  },
+                },
+              }
+            : {}),
+        },
         _sum: { amount: true },
       }),
       this.prisma.expense.aggregate({
-        where: { property: { organisationId }, reversedAt: null, date: { gte: monthStart } },
+        where: {
+          property: propertyScopeWhere(organisationId, role, userId),
+          reversedAt: null,
+          date: { gte: monthStart },
+        },
         _sum: { amount: true },
       }),
       this.prisma.lease.findMany({
         where: {
-          tenancy: { unit: { property: { organisationId } } },
+          tenancy: tenancyPropertyScope(organisationId, role, userId),
           status: LeaseStatus.ACTIVE,
           endDate: { gte: now, lte: new Date(now.getTime() + 60 * 86400000) },
         },
@@ -178,16 +306,37 @@ export class LandlordService {
       }),
       this.prisma.maintenanceRequest.count({
         where: {
-          unit: { property: { organisationId } },
+          unit: { property: propertyScopeWhere(organisationId, role, userId) },
           status: { notIn: [MaintenanceStatus.COMPLETED, MaintenanceStatus.REJECTED] },
         },
       }),
       this.prisma.auditLog.findMany({
-        where: { organisationId },
+        where:
+          role === MembershipRole.MANAGER
+            ? {
+                organisationId,
+                entityType: 'property',
+                entityId: { in: assignedPropertyIds ?? [] },
+              }
+            : { organisationId },
         select: { id: true, action: true, entityType: true, entityId: true, createdAt: true },
         orderBy: { createdAt: 'desc' },
         take: 8,
       }),
+      role === MembershipRole.MANAGER
+        ? Promise.resolve([])
+        : this.prisma.$queryRaw<Array<{ month: Date; collected: Prisma.Decimal }>>(
+        Prisma.sql`
+          SELECT date_trunc('month', "received_at") AS month, SUM(amount) AS collected
+          FROM payments
+          WHERE organisation_id = ${organisationId}::uuid
+            AND reversed_at IS NULL
+            AND received_at >= ${new Date(Date.UTC(now.getUTCFullYear(), 0, 1))}
+            AND received_at < ${new Date(Date.UTC(now.getUTCFullYear() + 1, 0, 1))}
+          GROUP BY 1
+          ORDER BY 1
+        `,
+      ),
     ]);
 
     const byStatus = Object.fromEntries(
@@ -209,13 +358,21 @@ export class LandlordService {
       },
       upcomingLeases,
       recentActivity: recentAudit,
+      monthlyCollections: monthlyCollections.map(({ month, collected }) => ({
+        month: month.toISOString().slice(0, 7),
+        collected: collected.toString(),
+      })),
     };
   }
 
-  async listProperties(organisationId: string) {
+  async listProperties(
+    organisationId: string,
+    role?: MembershipRole,
+    userId?: string,
+  ) {
     return {
       properties: await this.prisma.property.findMany({
-        where: { organisationId },
+        where: propertyScopeWhere(organisationId, role, userId),
         select: {
           id: true,
           name: true,
@@ -224,11 +381,100 @@ export class LandlordService {
           description: true,
           status: true,
           createdAt: true,
+          propertyOwner:
+            role === MembershipRole.ACCOUNTANT
+              ? false
+              : { select: { id: true, name: true, email: true, phone: true } },
           _count: { select: { units: true } },
         },
         orderBy: { createdAt: 'desc' },
       }),
     };
+  }
+
+  async listPropertyOwners(organisationId: string) {
+    return {
+      owners: await this.prisma.propertyOwner.findMany({
+        where: { organisationId },
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          phone: true,
+          _count: { select: { properties: true } },
+        },
+        orderBy: { name: 'asc' },
+      }),
+    };
+  }
+
+  async createPropertyOwner(
+    organisationId: string,
+    userId: string,
+    role: MembershipRole | undefined,
+    input: PropertyOwnerInput,
+  ) {
+    assertCanManageOwnership(role);
+    try {
+      const owner = await this.prisma.$transaction(async (transaction) => {
+        const created = await transaction.propertyOwner.create({
+          data: {
+            organisationId,
+            name: input.name.trim(),
+            email: input.email?.trim().toLowerCase() || null,
+            phone: input.phone?.trim() || null,
+          },
+        });
+        await addAudit(transaction, organisationId, userId, 'property_owner.created', 'property_owner', created.id);
+        return created;
+      });
+      return { owner };
+    } catch (error) {
+      if (isUniqueConflict(error)) {
+        throw new ConflictException('A property owner with this email already exists in the organisation');
+      }
+      throw error;
+    }
+  }
+
+  async updatePropertyOwner(
+    organisationId: string,
+    userId: string,
+    role: MembershipRole | undefined,
+    ownerId: string,
+    input: PropertyOwnerUpdateInput,
+  ) {
+    assertCanManageOwnership(role);
+    if (Object.keys(input).length === 0) {
+      throw new BadRequestException('Provide at least one property owner field to update');
+    }
+    try {
+      const owner = await this.prisma.$transaction(async (transaction) => {
+        const existing = await transaction.propertyOwner.findFirst({
+          where: { id: ownerId, organisationId },
+          select: { id: true },
+        });
+        if (!existing) throw new NotFoundException('Property owner was not found in this organisation');
+        const updated = await transaction.propertyOwner.update({
+          where: { id: ownerId },
+          data: {
+            name: input.name?.trim(),
+            email: input.email === undefined ? undefined : input.email?.trim().toLowerCase() || null,
+            phone: input.phone === undefined ? undefined : input.phone?.trim() || null,
+          },
+        });
+        await addAudit(transaction, organisationId, userId, 'property_owner.updated', 'property_owner', ownerId, {
+          changedFields: Object.keys(input),
+        });
+        return updated;
+      });
+      return { owner };
+    } catch (error) {
+      if (isUniqueConflict(error)) {
+        throw new ConflictException('A property owner with this email already exists in the organisation');
+      }
+      throw error;
+    }
   }
 
   async createProperty(
@@ -238,10 +484,21 @@ export class LandlordService {
     input: PropertyInput,
   ) {
     assertCanManage(role);
+    if (role === MembershipRole.MANAGER) {
+      throw new ForbiddenException('Property managers can manage only their assigned properties');
+    }
+    if (input.propertyOwnerId) {
+      const owner = await this.prisma.propertyOwner.findFirst({
+        where: { id: input.propertyOwnerId, organisationId },
+        select: { id: true },
+      });
+      if (!owner) throw new NotFoundException('Property owner was not found in this organisation');
+    }
     const property = await this.prisma.$transaction(async (transaction) => {
       const created = await transaction.property.create({
         data: {
           organisationId,
+          propertyOwnerId: input.propertyOwnerId,
           name: input.name.trim(),
           type: input.type,
           address: input.address.trim(),
@@ -263,9 +520,25 @@ export class LandlordService {
   ) {
     assertCanManage(role);
     if (Object.keys(input).length === 0) throw new BadRequestException('Provide at least one property field to update');
+    if (
+      role === MembershipRole.MANAGER &&
+      input.propertyOwnerId !== undefined
+    ) {
+      throw new ForbiddenException('Only owners and administrators can change property ownership');
+    }
+    if (input.propertyOwnerId) {
+      const owner = await this.prisma.propertyOwner.findFirst({
+        where: { id: input.propertyOwnerId, organisationId },
+        select: { id: true },
+      });
+      if (!owner) throw new NotFoundException('Property owner was not found in this organisation');
+    }
     const property = await this.prisma.$transaction(async (transaction) => {
       const existing = await transaction.property.findFirst({
-        where: { id: propertyId, organisationId },
+        where: {
+          id: propertyId,
+          ...propertyScopeWhere(organisationId, role, userId),
+        },
         select: { id: true },
       });
       if (!existing) throw new NotFoundException('Property was not found in this organisation');
@@ -286,6 +559,7 @@ export class LandlordService {
           type: input.type,
           address: input.address?.trim(),
           description: input.description === undefined ? undefined : input.description.trim() || null,
+          propertyOwnerId: input.propertyOwnerId === undefined ? undefined : input.propertyOwnerId,
           status: input.status,
         },
       });
@@ -297,10 +571,14 @@ export class LandlordService {
     return { property };
   }
 
-  async listUnits(organisationId: string) {
+  async listUnits(
+    organisationId: string,
+    role?: MembershipRole,
+    userId?: string,
+  ) {
     return {
       units: await this.prisma.unit.findMany({
-        where: { property: { organisationId } },
+        where: { property: propertyScopeWhere(organisationId, role, userId) },
         include: {
           property: { select: { id: true, name: true } },
           tenancies: {
@@ -323,7 +601,10 @@ export class LandlordService {
   ) {
     assertCanManage(role);
     const property = await this.prisma.property.findFirst({
-      where: { id: propertyId, organisationId },
+      where: {
+        id: propertyId,
+        ...propertyScopeWhere(organisationId, role, userId),
+      },
       select: { id: true },
     });
     if (!property) throw new NotFoundException('Property was not found in this organisation');
@@ -392,7 +673,10 @@ export class LandlordService {
     try {
       const unit = await this.prisma.$transaction(async (transaction) => {
         const existing = await transaction.unit.findFirst({
-          where: { id: unitId, property: { organisationId } },
+          where: {
+            id: unitId,
+            property: propertyScopeWhere(organisationId, role, userId),
+          },
           select: { id: true, status: true },
         });
         if (!existing) throw new NotFoundException('Unit was not found in this organisation');
@@ -455,13 +739,45 @@ export class LandlordService {
     }
   }
 
-  async listTenants(organisationId: string) {
+  async listTenants(
+    organisationId: string,
+    role?: MembershipRole,
+    userId?: string,
+  ) {
     return {
       tenants: await this.prisma.tenant.findMany({
-        where: { organisationId },
-        include: {
+        where: {
+          organisationId,
+          ...(role === MembershipRole.MANAGER
+            ? {
+                tenancies: {
+                  some: {
+                    unit: {
+                      property: propertyScopeWhere(organisationId, role, userId),
+                    },
+                  },
+                },
+              }
+            : {}),
+        },
+        select: {
+          id: true,
+          organisationId: role !== MembershipRole.ACCOUNTANT,
+          userId: role !== MembershipRole.ACCOUNTANT,
+          legalName: true,
+          phone: role !== MembershipRole.ACCOUNTANT,
+          email: role !== MembershipRole.ACCOUNTANT,
+          emergencyContactName: role !== MembershipRole.ACCOUNTANT,
+          emergencyContactPhone: role !== MembershipRole.ACCOUNTANT,
+          createdAt: role !== MembershipRole.ACCOUNTANT,
+          updatedAt: role !== MembershipRole.ACCOUNTANT,
           tenancies: {
-            where: { status: { in: [TenancyStatus.UPCOMING, TenancyStatus.ACTIVE] } },
+            where: {
+              status: { in: [TenancyStatus.UPCOMING, TenancyStatus.ACTIVE] },
+              ...(role === MembershipRole.MANAGER
+                ? { unit: { property: propertyScopeWhere(organisationId, role, userId) } }
+                : {}),
+            },
             select: {
               id: true,
               status: true,
@@ -511,7 +827,21 @@ export class LandlordService {
     if (Object.keys(input).length === 0) throw new BadRequestException('Provide at least one tenant field to update');
     const tenant = await this.prisma.$transaction(async (transaction) => {
       const existing = await transaction.tenant.findFirst({
-        where: { id: tenantId, organisationId },
+        where: {
+          id: tenantId,
+          organisationId,
+          ...(role === MembershipRole.MANAGER
+            ? {
+                tenancies: {
+                  some: {
+                    unit: {
+                      property: propertyScopeWhere(organisationId, role, userId),
+                    },
+                  },
+                },
+              }
+            : {}),
+        },
         select: { id: true },
       });
       if (!existing) throw new NotFoundException('Tenant was not found in this organisation');
@@ -537,12 +867,23 @@ export class LandlordService {
     return { tenant };
   }
 
-  async listTenancies(organisationId: string) {
+  async listTenancies(
+    organisationId: string,
+    role?: MembershipRole,
+    userId?: string,
+  ) {
     return {
       tenancies: await this.prisma.tenancy.findMany({
-        where: { unit: { property: { organisationId } } },
+        where: tenancyPropertyScope(organisationId, role, userId),
         include: {
-          tenant: { select: { id: true, legalName: true, email: true, phone: true } },
+          tenant: {
+            select: {
+              id: true,
+              legalName: true,
+              email: role !== MembershipRole.ACCOUNTANT,
+              phone: role !== MembershipRole.ACCOUNTANT,
+            },
+          },
           unit: { select: { id: true, unitNumber: true, property: { select: { id: true, name: true } } } },
           leases: { orderBy: { endDate: 'desc' }, take: 1 },
           deposit: { select: { id: true, requiredAmount: true, heldBalance: true, status: true } },
@@ -568,7 +909,10 @@ export class LandlordService {
       const [tenant, unit] = await Promise.all([
         transaction.tenant.findFirst({ where: { id: input.tenantId, organisationId } }),
         transaction.unit.findFirst({
-          where: { id: input.unitId, property: { organisationId } },
+          where: {
+            id: input.unitId,
+            property: propertyScopeWhere(organisationId, role, userId),
+          },
         }),
       ]);
       if (!tenant || !unit) throw new NotFoundException('Tenant or unit was not found in this organisation');
@@ -634,7 +978,10 @@ export class LandlordService {
     const moveOutDate = dateOnly(input.moveOutDate);
     const tenancy = await this.prisma.$transaction(async (transaction) => {
       const existing = await transaction.tenancy.findFirst({
-        where: { id: tenancyId, unit: { property: { organisationId } } },
+        where: {
+          id: tenancyId,
+          ...tenancyPropertyScope(organisationId, role, userId),
+        },
       });
       if (!existing) throw new NotFoundException('Tenancy was not found in this organisation');
       if (
@@ -683,10 +1030,14 @@ export class LandlordService {
     return { tenancy };
   }
 
-  async listLeases(organisationId: string) {
+  async listLeases(
+    organisationId: string,
+    role?: MembershipRole,
+    userId?: string,
+  ) {
     return {
       leases: await this.prisma.lease.findMany({
-        where: { tenancy: { unit: { property: { organisationId } } } },
+        where: { tenancy: tenancyPropertyScope(organisationId, role, userId) },
         include: {
           documents: {
             select: { id: true, version: true, documentStatus: true, fileId: true, createdAt: true },
@@ -857,10 +1208,14 @@ export class LandlordService {
     return { document };
   }
 
-  async listInspections(organisationId: string) {
+  async listInspections(
+    organisationId: string,
+    role?: MembershipRole,
+    userId?: string,
+  ) {
     return {
       inspections: await this.prisma.inspection.findMany({
-        where: { unit: { property: { organisationId } } },
+        where: { unit: { property: propertyScopeWhere(organisationId, role, userId) } },
         include: {
           unit: { select: { id: true, unitNumber: true, property: { select: { name: true } } } },
           tenancy: { select: { tenant: { select: { legalName: true } } } },
@@ -967,10 +1322,10 @@ export class LandlordService {
     return { media };
   }
 
-  async listCharges(organisationId: string) {
+  async listCharges(organisationId: string, role?: MembershipRole, userId?: string) {
     return {
       charges: await this.prisma.rentCharge.findMany({
-        where: { tenancy: { unit: { property: { organisationId } } } },
+        where: { tenancy: tenancyPropertyScope(organisationId, role, userId) },
         include: {
           allocations: {
             where: { payment: { reversedAt: null } },
@@ -1062,13 +1417,34 @@ export class LandlordService {
     return { charge };
   }
 
-  async listPayments(organisationId: string) {
+  async listPayments(organisationId: string, role?: MembershipRole, userId?: string) {
     return {
       payments: await this.prisma.payment.findMany({
-        where: { organisationId },
+        where: {
+          organisationId,
+          ...(role === MembershipRole.MANAGER
+            ? {
+                allocations: {
+                  some: {
+                    rentCharge: {
+                      tenancy: tenancyPropertyScope(organisationId, role, userId),
+                    },
+                  },
+                },
+              }
+            : {}),
+        },
         include: {
           tenant: { select: { id: true, legalName: true } },
           allocations: {
+            where:
+              role === MembershipRole.MANAGER
+                ? {
+                    rentCharge: {
+                      tenancy: tenancyPropertyScope(organisationId, role, userId),
+                    },
+                  }
+                : undefined,
             include: { rentCharge: { select: { id: true, period: true, amount: true } } },
           },
         },
@@ -1254,10 +1630,10 @@ export class LandlordService {
     return payment;
   }
 
-  async listDeposits(organisationId: string) {
+  async listDeposits(organisationId: string, role?: MembershipRole, userId?: string) {
     return {
       deposits: await this.prisma.deposit.findMany({
-        where: { tenancy: { unit: { property: { organisationId } } } },
+        where: { tenancy: tenancyPropertyScope(organisationId, role, userId) },
         include: {
           transactions: { orderBy: { date: 'desc' } },
           tenancy: {
@@ -1337,10 +1713,10 @@ export class LandlordService {
     return transactionResult;
   }
 
-  async listExpenses(organisationId: string) {
+  async listExpenses(organisationId: string, role?: MembershipRole, userId?: string) {
     return {
       expenses: await this.prisma.expense.findMany({
-        where: { property: { organisationId } },
+        where: { property: propertyScopeWhere(organisationId, role, userId) },
         include: { property: { select: { id: true, name: true } } },
         orderBy: { date: 'desc' },
       }),
@@ -1471,10 +1847,10 @@ export class LandlordService {
     return { utilityBill };
   }
 
-  async listUtilities(organisationId: string) {
+  async listUtilities(organisationId: string, role?: MembershipRole, userId?: string) {
     return {
       utilityBills: await this.prisma.utilityBill.findMany({
-        where: { property: { organisationId } },
+        where: { property: propertyScopeWhere(organisationId, role, userId) },
         include: {
           property: { select: { id: true, name: true } },
           allocations: { include: { unit: { select: { id: true, unitNumber: true } } } },
@@ -1583,10 +1959,19 @@ export class LandlordService {
     return { utilityBill };
   }
 
-  async listMaintenance(organisationId: string) {
+  async listMaintenance(
+    organisationId: string,
+    role?: MembershipRole,
+    userId?: string,
+  ) {
     return {
       requests: await this.prisma.maintenanceRequest.findMany({
-        where: { unit: { property: { organisationId } } },
+        where: {
+          unit: { property: propertyScopeWhere(organisationId, role, userId) },
+          ...(role === MembershipRole.MAINTENANCE_STAFF
+            ? { assignedToUserId: userId }
+            : {}),
+        },
         include: {
           tenant: { select: { id: true, legalName: true } },
           unit: { select: { id: true, unitNumber: true, property: { select: { id: true, name: true } } } },
@@ -1668,10 +2053,13 @@ export class LandlordService {
               userId: input.assignedToUserId,
             },
           },
-          select: { status: true },
+          select: { status: true, role: true },
         });
-        if (membership?.status !== MembershipStatus.ACTIVE) {
-          throw new BadRequestException('Assignee must be an active organisation member');
+        if (
+          membership?.status !== MembershipStatus.ACTIVE ||
+          membership.role !== MembershipRole.MAINTENANCE_STAFF
+        ) {
+          throw new BadRequestException('Assignee must be an active maintenance staff member');
         }
       }
       if (input.actualCost && input.status !== MaintenanceStatus.COMPLETED) {
@@ -1726,10 +2114,10 @@ export class LandlordService {
     return { request };
   }
 
-  async listNotices(organisationId: string) {
+  async listNotices(organisationId: string, role?: MembershipRole, userId?: string) {
     return {
       notices: await this.prisma.notice.findMany({
-        where: { tenancy: { unit: { property: { organisationId } } } },
+        where: { tenancy: tenancyPropertyScope(organisationId, role, userId) },
         include: {
           tenancy: {
             select: {
@@ -1778,10 +2166,45 @@ export class LandlordService {
     return { notice };
   }
 
-  async getFinancialReport(organisationId: string, from?: string, to?: string) {
+  async getFinancialReport(
+    organisationId: string,
+    from?: string,
+    to?: string,
+    ownerId?: string,
+    role?: MembershipRole,
+    userId?: string,
+  ) {
     const fromDate = from ? dateOnly(from) : new Date(Date.UTC(new Date().getUTCFullYear(), 0, 1));
     const toDate = to ? dateOnly(to) : new Date(Date.UTC(new Date().getUTCFullYear(), 11, 31));
     if (toDate < fromDate) throw new BadRequestException('Report end date must not be before its start date');
+    let propertyOwner: { id: string; name: string } | null = null;
+    if (ownerId) {
+      propertyOwner = await this.prisma.propertyOwner.findFirst({
+        where: { id: ownerId, organisationId },
+        select: { id: true, name: true },
+      });
+      if (!propertyOwner) throw new NotFoundException('Property owner was not found in this organisation');
+    }
+    const propertyScope: Prisma.PropertyWhereInput = {
+      ...propertyScopeWhere(organisationId, role, userId),
+      ...(ownerId ? { propertyOwnerId: ownerId } : {}),
+    };
+    const paymentScope: Prisma.PaymentWhereInput = {
+      organisationId,
+      reversedAt: null,
+      receivedAt: { gte: fromDate, lte: toDate },
+      ...(ownerId
+        ? {
+            allocations: {
+              some: {
+                rentCharge: {
+                  tenancy: { unit: { property: propertyScope } },
+                },
+              },
+            },
+          }
+        : {}),
+    };
     const [
       charges,
       payments,
@@ -1794,66 +2217,85 @@ export class LandlordService {
     ] = await Promise.all([
       this.prisma.rentCharge.aggregate({
         where: {
-          tenancy: { unit: { property: { organisationId } } },
+          tenancy: { unit: { property: propertyScope } },
           dueDate: { gte: fromDate, lte: toDate },
           status: { not: RentChargeStatus.VOID },
         },
         _sum: { amount: true },
       }),
       this.prisma.payment.aggregate({
-        where: { organisationId, reversedAt: null, receivedAt: { gte: fromDate, lte: toDate } },
+        where: paymentScope,
         _sum: { amount: true },
         _count: { _all: true },
       }),
       this.prisma.paymentAllocation.aggregate({
         where: {
           payment: {
-            organisationId,
-            reversedAt: null,
-            receivedAt: { gte: fromDate, lte: toDate },
+            ...paymentScope,
+            ...(ownerId
+              ? {
+                  allocations: {
+                    some: {
+                      rentCharge: {
+                        tenancy: { unit: { property: propertyScope } },
+                      },
+                    },
+                  },
+                }
+              : {}),
           },
+          ...(ownerId
+            ? {
+                rentCharge: {
+                  tenancy: { unit: { property: propertyScope } },
+                },
+              }
+            : {}),
         },
         _sum: { allocatedAmount: true },
       }),
       this.prisma.rentCharge.aggregate({
         where: {
-          tenancy: { unit: { property: { organisationId } } },
+          tenancy: { unit: { property: propertyScope } },
           status: { in: [RentChargeStatus.PENDING, RentChargeStatus.PARTIALLY_PAID, RentChargeStatus.OVERDUE] },
         },
         _sum: { balance: true },
       }),
       this.prisma.expense.aggregate({
-        where: { property: { organisationId }, reversedAt: null, date: { gte: fromDate, lte: toDate } },
+        where: { property: propertyScope, reversedAt: null, date: { gte: fromDate, lte: toDate } },
         _sum: { amount: true },
         _count: { _all: true },
       }),
       this.prisma.maintenanceExpense.aggregate({
         where: {
-          request: { unit: { property: { organisationId } } },
+          request: { unit: { property: propertyScope } },
           createdAt: { gte: fromDate, lte: toDate },
         },
         _sum: { amount: true },
         _count: { _all: true },
       }),
       this.prisma.deposit.aggregate({
-        where: { tenancy: { unit: { property: { organisationId } } } },
+        where: { tenancy: { unit: { property: propertyScope } } },
         _sum: { receivedAmount: true, heldBalance: true },
       }),
       this.prisma.unit.groupBy({
         by: ['status'],
-        where: { property: { organisationId }, status: { not: UnitStatus.ARCHIVED } },
+        where: { property: propertyScope, status: { not: UnitStatus.ARCHIVED } },
         _count: { _all: true },
       }),
     ]);
     const occupancyCounts = Object.fromEntries(
       occupancy.map((row) => [row.status, row._count._all]),
     ) as Record<string, number>;
-    const collected = payments._sum.amount ?? new Prisma.Decimal(0);
     const allocated = allocatedPayments._sum.allocatedAmount ?? new Prisma.Decimal(0);
+    const collected = ownerId
+      ? allocated
+      : payments._sum.amount ?? new Prisma.Decimal(0);
     const ordinaryExpenseTotal = expenses._sum.amount ?? new Prisma.Decimal(0);
     const maintenanceExpenseTotal = maintenanceExpenses._sum.amount ?? new Prisma.Decimal(0);
     return {
       period: { from: fromDate.toISOString().slice(0, 10), to: toDate.toISOString().slice(0, 10) },
+      ...(propertyOwner ? { propertyOwner } : {}),
       rent: {
         charged: charges._sum.amount?.toString() ?? '0',
         outstanding: currentOutstanding._sum.balance?.toString() ?? '0',
@@ -1885,7 +2327,19 @@ export class LandlordService {
       members: await this.prisma.organisationMember.findMany({
         where: { organisationId },
         include: {
-          user: { select: { id: true, name: true, email: true } },
+          user: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+              propertyAssignments: {
+                where: { property: { organisationId } },
+                select: {
+                  property: { select: { id: true, name: true } },
+                },
+              },
+            },
+          },
         },
         orderBy: [{ role: 'asc' }, { invitedAt: 'asc' }],
       }),
@@ -1901,6 +2355,15 @@ export class LandlordService {
     assertCanManage(role);
     if (input.role === MembershipRole.OWNER) {
       throw new BadRequestException('A team invitation cannot grant the owner role');
+    }
+    if (input.role === MembershipRole.STAFF) {
+      throw new BadRequestException('Assign a specific team role instead of generic staff');
+    }
+    if (input.role === MembershipRole.MANAGER && !input.propertyIds?.length) {
+      throw new BadRequestException('Assign at least one property to a property manager');
+    }
+    if (input.role !== MembershipRole.MANAGER && input.propertyIds?.length) {
+      throw new BadRequestException('Property assignments are only valid for property managers');
     }
     const target = await this.prisma.user.findUnique({
       where: { email: input.email.trim().toLowerCase() },
@@ -1919,8 +2382,8 @@ export class LandlordService {
         throw new ConflictException('This user is already an active team member');
       }
       if (
-        (role === MembershipRole.MANAGER && input.role !== MembershipRole.STAFF) ||
-        (role === MembershipRole.ADMIN && input.role === MembershipRole.ADMIN)
+        role === MembershipRole.MANAGER ||
+        (role === MembershipRole.ADMIN && restrictedAdminGrants.has(input.role))
       ) {
         throw new ForbiddenException('Your role cannot grant that team permission');
       }
@@ -1940,8 +2403,16 @@ export class LandlordService {
         },
         include: { user: { select: { id: true, name: true, email: true } } },
       });
+      await setPropertyAssignments(
+        transaction,
+        organisationId,
+        target.id,
+        input.role,
+        input.propertyIds ?? [],
+      );
       await addAudit(transaction, organisationId, userId, 'team.member_invited', 'organisation_member', target.id, {
         role: input.role,
+        propertyIds: input.propertyIds ?? [],
       });
       return created;
     });
@@ -1959,9 +2430,12 @@ export class LandlordService {
     if (input.role === MembershipRole.OWNER) {
       throw new BadRequestException('Use organisation ownership transfer to change an owner');
     }
+    if (input.role === MembershipRole.STAFF) {
+      throw new BadRequestException('Assign a specific team role instead of generic staff');
+    }
     if (
-      (role === MembershipRole.MANAGER && input.role !== MembershipRole.STAFF) ||
-      (role === MembershipRole.ADMIN && input.role === MembershipRole.ADMIN)
+      role === MembershipRole.MANAGER ||
+      (role === MembershipRole.ADMIN && restrictedAdminGrants.has(input.role))
     ) {
       throw new ForbiddenException('Your role cannot grant that team permission');
     }
@@ -1973,13 +2447,29 @@ export class LandlordService {
       if (existing.role === MembershipRole.OWNER) {
         throw new ForbiddenException('The organisation owner role cannot be changed here');
       }
+      if (input.role === MembershipRole.MANAGER && existing.role !== MembershipRole.MANAGER && !input.propertyIds?.length) {
+        throw new BadRequestException('Assign at least one property to a property manager');
+      }
+      if (input.role !== MembershipRole.MANAGER && input.propertyIds?.length) {
+        throw new BadRequestException('Property assignments are only valid for property managers');
+      }
       const updated = await transaction.organisationMember.update({
         where: { organisationId_userId: { organisationId, userId: memberId } },
         data: { role: input.role },
         include: { user: { select: { id: true, name: true, email: true } } },
       });
+      if (input.propertyIds !== undefined || existing.role !== input.role) {
+        await setPropertyAssignments(
+          transaction,
+          organisationId,
+          memberId,
+          input.role,
+          input.propertyIds ?? [],
+        );
+      }
       await addAudit(transaction, organisationId, userId, 'team.member_role_changed', 'organisation_member', memberId, {
         role: input.role,
+        propertyIds: input.propertyIds ?? [],
       });
       return updated;
     });

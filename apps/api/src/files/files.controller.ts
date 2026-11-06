@@ -1,13 +1,17 @@
 import {
   Body,
   Controller,
+  ForbiddenException,
   Get,
   Param,
   ParseUUIDPipe,
   Post,
+  Req,
   UseGuards,
 } from '@nestjs/common';
+import { MembershipRole } from '@prisma/client';
 import { Throttle } from '@nestjs/throttler';
+import type { Request } from 'express';
 import { CurrentUser } from '../auth/current-user.decorator.js';
 import { JwtAccessGuard } from '../auth/jwt-access.guard.js';
 import type { AccessTokenClaims } from '../auth/auth.types.js';
@@ -31,7 +35,9 @@ export class FilesController {
     @Param('organisationId', ParseUUIDPipe) organisationId: string,
     @CurrentUser() user: AccessTokenClaims,
     @Body() input: CreateUploadDto,
+    @Req() request: Request,
   ) {
+    this.assertCanUpload(request.organisationRole);
     return this.storage.createUploadUrl(organisationId, user.sub, input);
   }
 
@@ -41,7 +47,9 @@ export class FilesController {
     @Param('organisationId', ParseUUIDPipe) organisationId: string,
     @CurrentUser() user: AccessTokenClaims,
     @Param('fileId', ParseUUIDPipe) fileId: string,
+    @Req() request: Request,
   ) {
+    this.assertCanUpload(request.organisationRole);
     return this.storage.completeUpload(organisationId, user.sub, fileId);
   }
 
@@ -50,7 +58,24 @@ export class FilesController {
     @Param('organisationId', ParseUUIDPipe) organisationId: string,
     @CurrentUser() user: AccessTokenClaims,
     @Param('fileId', ParseUUIDPipe) fileId: string,
+    @Req() request: Request,
   ) {
-    return this.storage.createDownloadUrl(organisationId, user.sub, fileId);
+    return this.storage.createDownloadUrl(
+      organisationId,
+      user.sub,
+      fileId,
+      request.organisationRole,
+    );
+  }
+
+  private assertCanUpload(role: MembershipRole | undefined): void {
+    if (
+      role !== MembershipRole.OWNER &&
+      role !== MembershipRole.ADMIN &&
+      role !== MembershipRole.MANAGER &&
+      role !== MembershipRole.ACCOUNTANT
+    ) {
+      throw new ForbiddenException('Your organisation role cannot upload files');
+    }
   }
 }

@@ -7,6 +7,7 @@ import {
   TeamInvitationController,
 } from './landlord.controller.js';
 import { LandlordService } from './landlord.service.js';
+import { LandlordPermissionsGuard } from './landlord-permissions.guard.js';
 import { LandlordSubscriptionModule } from './landlord-subscription.module.js';
 
 @Module({
@@ -17,6 +18,6 @@ import { LandlordSubscriptionModule } from './landlord-subscription.module.js';
     LandlordSubscriptionModule,
   ],
   controllers: [LandlordController, TeamInvitationController],
-  providers: [LandlordService],
+  providers: [LandlordService, LandlordPermissionsGuard],
 })
 export class LandlordModule {}
