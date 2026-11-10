@@ -21,12 +21,25 @@ export function AuthForm({ mode }: AuthFormProps) {
     event.preventDefault();
     if (isSubmitting) return;
 
+    setFeedback(null);
     const formData = new FormData(event.currentTarget);
+    const password = String(formData.get("password") ?? "");
+
+    if (isRegister && password !== String(formData.get("confirmPassword") ?? "")) {
+      const confirmationField =
+        event.currentTarget.elements.namedItem("confirmPassword");
+      if (confirmationField instanceof HTMLInputElement) {
+        confirmationField.focus();
+      }
+      setFeedback({ kind: "error", message: "Passwords do not match." });
+      return;
+    }
+
     const payload = isRegister
       ? {
           name: String(formData.get("name") ?? "").trim(),
           email: String(formData.get("email") ?? "").trim(),
-          password: String(formData.get("password") ?? ""),
+          password,
           organisationName: String(
             formData.get("organisationName") ?? "",
           ).trim(),
@@ -34,11 +47,10 @@ export function AuthForm({ mode }: AuthFormProps) {
         }
       : {
           email: String(formData.get("email") ?? "").trim(),
-          password: String(formData.get("password") ?? ""),
+          password,
         };
 
     setIsSubmitting(true);
-    setFeedback(null);
 
     try {
       const response = await fetch(
@@ -155,6 +167,21 @@ export function AuthForm({ mode }: AuthFormProps) {
           required
         />
       </div>
+      {isRegister && (
+        <div className="form-field">
+          <label htmlFor="auth-confirm-password">Confirm password <span className="required-field-marker" aria-hidden="true">*</span></label>
+          <input
+            id="auth-confirm-password"
+            name="confirmPassword"
+            type="password"
+            autoComplete="new-password"
+            minLength={12}
+            maxLength={128}
+            placeholder="Re-enter your password"
+            required
+          />
+        </div>
+      )}
       <button
         type="submit"
         className="button button-primary button-large"

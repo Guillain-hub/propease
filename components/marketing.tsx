@@ -134,10 +134,12 @@ export function PrimaryCta({
   title = "Take control of your property management today.",
   description = "Bring your property records, rent tracking and day-to-day tasks together with PropEase.",
   buttonLabel = "Get started",
+  href = "/register",
 }: {
   title?: string;
   description?: string;
   buttonLabel?: string;
+  href?: string;
 }) {
   return (
     <section className="cta-section">
@@ -146,7 +148,7 @@ export function PrimaryCta({
         <SectionEyebrow>YOUR NEXT CHAPTER</SectionEyebrow>
         <h2>{title}</h2>
         <p>{description}</p>
-        <Link className="button button-primary" href="/register">{buttonLabel}<ArrowUpRight size={16} /></Link>
+        <Link className="button button-primary" href={href}>{buttonLabel}<ArrowUpRight size={16} /></Link>
         <span className="cta-note"><Check size={14} /> A clearer way to manage, starting here.</span>
       </div>
       <div className="cta-mark" aria-hidden="true"><Building2 size={120} strokeWidth={0.75} /></div>

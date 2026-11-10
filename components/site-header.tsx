@@ -79,7 +79,12 @@ export function SiteHeader() {
           <Brand />
           <nav className="desktop-nav" aria-label="Product navigation">
             {productLinks.map(({ href, label }) => (
-              <Link key={href} href={href} className="nav-link">
+              <Link
+                key={href}
+                href={href}
+                className={`nav-link${pathname === href ? " active" : ""}`}
+                aria-current={pathname === href ? "page" : undefined}
+              >
                 {label}
               </Link>
             ))}
@@ -88,12 +93,23 @@ export function SiteHeader() {
         <div className="nav-right">
           <nav className="desktop-nav" aria-label="Company navigation">
             {companyLinks.map(({ href, label }) => (
-              <Link key={href} href={href} className="nav-link">
+              <Link
+                key={href}
+                href={href}
+                className={`nav-link${pathname === href ? " active" : ""}`}
+                aria-current={pathname === href ? "page" : undefined}
+              >
                 {label}
               </Link>
             ))}
           </nav>
-          <Link className="login-link" href="/login">Log in</Link>
+          <Link
+            className={`login-link${pathname === "/login" ? " active" : ""}`}
+            href="/login"
+            aria-current={pathname === "/login" ? "page" : undefined}
+          >
+            Log in
+          </Link>
         </div>
         <button
           type="button"
@@ -109,11 +125,24 @@ export function SiteHeader() {
       {open && (
         <nav id="mobile-navigation" className="mobile-nav" aria-label="Mobile navigation">
           {[...productLinks, ...companyLinks].map(({ href, label }) => (
-            <Link key={href} href={href} onClick={() => setOpen(false)}>
+            <Link
+              key={href}
+              href={href}
+              className={pathname === href ? "active" : undefined}
+              aria-current={pathname === href ? "page" : undefined}
+              onClick={() => setOpen(false)}
+            >
               {label}
             </Link>
           ))}
-          <Link href="/login" onClick={() => setOpen(false)}>Log in</Link>
+          <Link
+            href="/login"
+            className={pathname === "/login" ? "active" : undefined}
+            aria-current={pathname === "/login" ? "page" : undefined}
+            onClick={() => setOpen(false)}
+          >
+            Log in
+          </Link>
         </nav>
       )}
     </header>

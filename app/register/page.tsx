@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { ArrowLeft, ArrowUpRight } from "lucide-react";
+import { ArrowUpRight } from "lucide-react";
 import { AuthForm } from "@/components/auth-form";
 
 export const metadata: Metadata = { title: "Create an account" };
@@ -9,7 +9,6 @@ export default function RegisterPage() {
   return (
     <section className="auth-page">
       <div className="auth-card">
-        <Link href="/" className="auth-back"><ArrowLeft size={15} /> Back to PropEase</Link>
         <span className="eyebrow"><span className="eyebrow-dot" />GET STARTED</span>
         <h1>Create your PropEase account.</h1>
         <p className="auth-intro">Start building a more organised way to manage your properties.</p>

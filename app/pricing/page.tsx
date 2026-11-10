@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Check, HelpCircle } from "lucide-react";
+import { HelpCircle } from "lucide-react";
 import { PageIntro, PrimaryCta } from "@/components/marketing";
 import { PricingPlans } from "@/components/pricing-plans";
 
@@ -20,30 +20,8 @@ export default function PricingPage() {
     <>
       <section className="page-hero pricing-hero">
         <div className="container">
-          <PageIntro eyebrow="PLANS THAT FIT YOUR WORK" title="The right tools for your next step." description="Whether you manage one home or a growing portfolio, find the PropEase plan shaped around your work." />
-          <div className="pricing-release-note"><span><Check size={15} /></span>Proposed monthly prices in RWF, with an option for portfolios of every size.</div>
+          <PageIntro eyebrow="PRICING" title="Straightforward plans for every portfolio." description="Choose a plan based on the number of active rental units you manage." />
           <PricingPlans />
-        </div>
-      </section>
-      <section className="section">
-        <div className="container comparison-section">
-          <div className="section-heading"><span className="eyebrow"><span className="eyebrow-dot" />PLAN OVERVIEW</span><h2>Choose by portfolio size.</h2><p>Compare the active rental unit limits and proposed monthly prices at a glance.</p></div>
-          <div className="comparison-table-wrap">
-            <table className="comparison-table">
-              <thead><tr><th>Plan</th><th>Active rental units</th><th>Proposed monthly price</th></tr></thead>
-              <tbody>
-                {[
-                  ["Free trial", "Up to 3", "14 days"],
-                  ["Starter", "Up to 3", "RWF 5,000"],
-                  ["Professional", "Up to 15", "RWF 15,000"],
-                  ["Business", "Up to 50", "RWF 35,000"],
-                  ["Enterprise", "51+", "Custom"],
-                ].map(([name, units, price]) => (
-                  <tr key={name}><td>{name}</td><td>{units}</td><td>{price}</td></tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
         </div>
       </section>
       <section className="section section-soft">
@@ -52,7 +30,7 @@ export default function PricingPage() {
           <div className="faq-list">{faqs.map(([question, answer]) => <details className="faq-item" key={question}><summary>{question}<HelpCircle size={17} /></summary><p>{answer}</p></details>)}</div>
         </div>
       </section>
-      <div className="container"><PrimaryCta title="Need a plan for a larger portfolio?" description="Contact us about custom proposed pricing for portfolios with 51 or more active rental units." buttonLabel="Contact us" /></div>
+      <div className="container"><PrimaryCta title="Need a plan for a larger portfolio?" description="Contact us about custom proposed pricing for portfolios with 51 or more active rental units." buttonLabel="Contact us" href="/contact" /></div>
     </>
   );
 }
