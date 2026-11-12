@@ -8,7 +8,7 @@ type Feedback = { kind: "success" | "error"; message: string };
 type ApiError = { message?: string | string[] };
 
 const apiBaseUrl = (
-  process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4000/api/v1"
+  process.env.NEXT_PUBLIC_API_URL ?? "/api/v1"
 ).replace(/\/+$/, "");
 
 export function PasswordRecoveryForm({ mode }: PasswordRecoveryFormProps) {

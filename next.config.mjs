@@ -7,6 +7,18 @@ const nextConfig = {
     cpus: 1,
   },
   outputFileTracingRoot: fileURLToPath(new URL(".", import.meta.url)),
+  async rewrites() {
+    const apiOrigin = (process.env.API_ORIGIN ?? "http://localhost:4000").replace(
+      /\/+$/,
+      "",
+    );
+    return [
+      {
+        source: "/api/v1/:path*",
+        destination: `${apiOrigin}/api/v1/:path*`,
+      },
+    ];
+  },
 };
 
 export default nextConfig;
