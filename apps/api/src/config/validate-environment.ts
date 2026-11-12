@@ -72,6 +72,34 @@ export function validateEnvironment(
     throw new Error("REDIS_URL must use redis:// or rediss:// and include a hostname");
   }
 
+  const googleKeys = [
+    "GOOGLE_CLIENT_ID",
+    "GOOGLE_CLIENT_SECRET",
+    "GOOGLE_REDIRECT_URI",
+  ];
+  const configuredGoogleKeys = googleKeys.filter(
+    (key) => typeof environment[key] === "string" && environment[key],
+  );
+  if (configuredGoogleKeys.length && configuredGoogleKeys.length !== googleKeys.length) {
+    throw new Error(
+      "Google sign-in requires GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REDIRECT_URI",
+    );
+  }
+  if (configuredGoogleKeys.length) {
+    try {
+      const callback = new URL(String(environment.GOOGLE_REDIRECT_URI));
+      if (
+        (callback.protocol !== "http:" && callback.protocol !== "https:") ||
+        callback.username ||
+        callback.password
+      ) {
+        throw new Error();
+      }
+    } catch {
+      throw new Error("GOOGLE_REDIRECT_URI must be a valid HTTP(S) URL");
+    }
+  }
+
   return {
     ...environment,
     PORT: port,

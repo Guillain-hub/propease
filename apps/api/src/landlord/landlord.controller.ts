@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   ParseUUIDPipe,
@@ -190,6 +191,21 @@ export class LandlordController {
     );
   }
 
+  @Patch('units/:unitId/archive')
+  archiveUnit(
+    @Param('organisationId', ParseUUIDPipe) organisationId: string,
+    @Param('unitId', ParseUUIDPipe) unitId: string,
+    @CurrentUser() user: AccessTokenClaims,
+    @Req() request: Request,
+  ) {
+    return this.landlord.archiveUnit(
+      organisationId,
+      user.sub,
+      actorRole(request),
+      unitId,
+    );
+  }
+
   @Get('tenants')
   listTenants(
     @Param('organisationId', ParseUUIDPipe) organisationId: string,
@@ -223,6 +239,21 @@ export class LandlordController {
       actorRole(request),
       tenantId,
       input,
+    );
+  }
+
+  @Patch('tenants/:tenantId/archive')
+  archiveTenant(
+    @Param('organisationId', ParseUUIDPipe) organisationId: string,
+    @Param('tenantId', ParseUUIDPipe) tenantId: string,
+    @CurrentUser() user: AccessTokenClaims,
+    @Req() request: Request,
+  ) {
+    return this.landlord.archiveTenant(
+      organisationId,
+      user.sub,
+      actorRole(request),
+      tenantId,
     );
   }
 
@@ -692,6 +723,21 @@ export class LandlordController {
       actorRole(request),
       memberId,
       input,
+    );
+  }
+
+  @Delete('team/:memberId')
+  removeTeamMember(
+    @Param('organisationId', ParseUUIDPipe) organisationId: string,
+    @Param('memberId', ParseUUIDPipe) memberId: string,
+    @CurrentUser() user: AccessTokenClaims,
+    @Req() request: Request,
+  ) {
+    return this.landlord.removeTeamMember(
+      organisationId,
+      user.sub,
+      actorRole(request),
+      memberId,
     );
   }
 

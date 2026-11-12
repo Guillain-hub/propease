@@ -135,15 +135,6 @@ const navigation: { label: SectionName; icon: LucideIcon }[] = [
   { label: "Subscription", icon: CreditCard },
   { label: "Settings", icon: Settings },
 ];
-const sidebarNavigation: { label: SectionName; title: string; icon: LucideIcon }[] = [
-  { label: "Overview", title: "Overview", icon: LayoutDashboard },
-  { label: "Properties", title: "Properties", icon: Building2 },
-  { label: "Tenants", title: "Tenants", icon: Users },
-  { label: "Leases", title: "Leases", icon: FileText },
-  { label: "Rent & Deposits", title: "Rent records", icon: CircleDollarSign },
-  { label: "Inspections", title: "Inspections", icon: ClipboardCheck },
-  { label: "Maintenance", title: "Maintenance", icon: Wrench },
-];
 async function requestJson<T>(path: string): Promise<T> {
   const response = await fetch(`${apiBaseUrl}${path}`, {
     credentials: "include",
@@ -187,10 +178,12 @@ function formatActivity(action: string): string {
 function DashboardSearch({
   organisationId,
   properties,
+  visibleSections,
   onNavigate,
 }: {
   organisationId?: string;
   properties: Property[];
+  visibleSections: SectionName[];
   onNavigate: (section: SectionName) => void;
 }) {
   const searchInput = useRef<HTMLInputElement>(null);
@@ -205,7 +198,11 @@ function DashboardSearch({
     .filter((tenant) => `${tenant.legalName} ${tenant.email ?? ""} ${tenant.phone ?? ""}`.toLowerCase().includes(query.trim().toLowerCase()))
     .slice(0, 4);
   const matchingSections = navigation
-    .filter(({ label }) => label.toLowerCase().includes(query.trim().toLowerCase()))
+    .filter(
+      ({ label }) =>
+        visibleSections.includes(label) &&
+        label.toLowerCase().includes(query.trim().toLowerCase()),
+    )
     .slice(0, 3);
 
   useEffect(() => {
@@ -310,10 +307,12 @@ function DashboardSearch({
 
 function ActivityPopover({
   activity,
+  canOpenSettings,
   onClose,
   onOpenSettings,
 }: {
   activity: OverviewData["recentActivity"];
+  canOpenSettings: boolean;
   onClose: () => void;
   onOpenSettings: () => void;
 }) {
@@ -331,7 +330,9 @@ function ActivityPopover({
       )) : (
         <p className="dashboard-search-message">No recent activity to show.</p>
       )}
-      <button className="dashboard-popover-link" type="button" onClick={onOpenSettings}>Open workspace settings</button>
+      {canOpenSettings && (
+        <button className="dashboard-popover-link" type="button" onClick={onOpenSettings}>Open workspace settings</button>
+      )}
     </div>
   );
 }
@@ -342,6 +343,7 @@ export default function DashboardPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeSection, setActiveSection] = useState<SectionName>("Overview");
+  const sectionInitialized = useRef(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -391,13 +393,16 @@ export default function DashboardPage() {
           : [{ properties: [] }, null];
 
         if (active) {
-          setActiveSection(
-            role === "ACCOUNTANT"
-              ? "Reports"
-              : role === "MAINTENANCE_STAFF"
-                ? "Maintenance"
-                : "Overview",
-          );
+          if (!sectionInitialized.current) {
+            setActiveSection(
+              role === "ACCOUNTANT"
+                ? "Reports"
+                : role === "MAINTENANCE_STAFF"
+                  ? "Maintenance"
+                  : "Overview",
+            );
+            sectionInitialized.current = true;
+          }
           setData({
             user: currentUser.user,
             organisation,
@@ -459,8 +464,20 @@ export default function DashboardPage() {
 
   if (loading) {
     return (
-      <div className="dashboard-loading" role="status">
-        Loading your workspace...
+      <div className="dashboard-loading" role="status" aria-label="Loading your workspace">
+        <div className="dashboard-loading-content">
+          <Image
+            src="/images/new logo.png"
+            alt="PropEase"
+            width={400}
+            height={133}
+            priority
+          />
+          <div className="dashboard-loading-track" aria-hidden="true">
+            <span />
+          </div>
+          <span className="dashboard-loading-label">Loading your workspace...</span>
+        </div>
       </div>
     );
   }
@@ -493,16 +510,12 @@ export default function DashboardPage() {
     }
     if (data.role === "MAINTENANCE_STAFF") return label === "Maintenance";
     if (data.role === "MANAGER") {
-      return !["Team", "Subscription", "Settings"].includes(label);
+      return !["Expenses", "Team", "Subscription", "Settings"].includes(label);
     }
     return data.role === "OWNER" || data.role === "ADMIN";
   });
-  const visibleSidebarNavigation = sidebarNavigation.filter(({ label }) =>
-    visibleNavigation.some((item) => item.label === label),
-  );
-  const visibleAdditionalNavigation = visibleNavigation.filter(
-    ({ label }) => !visibleSidebarNavigation.some((item) => item.label === label),
-  );
+  const canManageWorkspaceSettings = ["OWNER", "ADMIN"].includes(data.role);
+  const canCreateProperties = ["OWNER", "ADMIN"].includes(data.role);
 
   return (
     <div className="landlord-dashboard">
@@ -537,7 +550,7 @@ export default function DashboardPage() {
         </div>
         <div className="dashboard-sidebar-label">WORKSPACE</div>
         <nav className="landlord-navigation" aria-label="Workspace">
-          {visibleSidebarNavigation.map(({ label, title, icon: Icon }) => (
+          {visibleNavigation.map(({ label, icon: Icon }) => (
             <button
               className={`landlord-nav-item${activeSection === label ? " is-active" : ""}`}
               key={label}
@@ -549,32 +562,9 @@ export default function DashboardPage() {
               aria-current={activeSection === label ? "page" : undefined}
             >
               <Icon size={18} strokeWidth={1.8} />
-              <span>{title}</span>
+              <span>{label === "Rent & Deposits" ? "Rent records" : label}</span>
             </button>
           ))}
-          <details className="dashboard-more-navigation">
-            <summary>
-              <ChevronDown size={16} aria-hidden="true" />
-              <span>More workspace</span>
-            </summary>
-            <div>
-              {visibleAdditionalNavigation.map(({ label, icon: Icon }) => (
-                <button
-                  className={`landlord-nav-item${activeSection === label ? " is-active" : ""}`}
-                  key={label}
-                  onClick={() => {
-                    setActiveSection(label);
-                    setMobileMenuOpen(false);
-                  }}
-                  type="button"
-                  aria-current={activeSection === label ? "page" : undefined}
-                >
-                  <Icon size={17} strokeWidth={1.8} />
-                  <span>{label}</span>
-                </button>
-              ))}
-            </div>
-          </details>
         </nav>
         <button className="dashboard-sidebar-help" type="button" onClick={() => router.push("/contact")}>
           <span>Need a hand?</span>
@@ -601,6 +591,7 @@ export default function DashboardPage() {
             <DashboardSearch
               organisationId={data.organisation?.id}
               properties={data.properties}
+              visibleSections={visibleNavigation.map(({ label }) => label)}
               onNavigate={(section) => setActiveSection(section)}
             />
           )}
@@ -619,6 +610,7 @@ export default function DashboardPage() {
               {notificationsOpen && (
                 <ActivityPopover
                   activity={data.overview?.recentActivity ?? []}
+                  canOpenSettings={canManageWorkspaceSettings}
                   onClose={() => setNotificationsOpen(false)}
                   onOpenSettings={() => { setActiveSection("Settings"); setNotificationsOpen(false); }}
                 />
@@ -640,7 +632,9 @@ export default function DashboardPage() {
                 <div className="dashboard-profile-menu">
                   <b>{data.user.name}</b>
                   <span>{data.user.email}</span>
-                  <button type="button" onClick={() => { setActiveSection("Settings"); setProfileOpen(false); }}>Account settings</button>
+                  {canManageWorkspaceSettings && (
+                    <button type="button" onClick={() => { setActiveSection("Settings"); setProfileOpen(false); }}>Account settings</button>
+                  )}
                   <button
                     type="button"
                     disabled={isLoggingOut}
@@ -670,6 +664,7 @@ export default function DashboardPage() {
               data={data}
               unitCount={unitCount}
               overview={data.overview}
+              canAddProperty={canCreateProperties}
               onOpenProperties={() => setActiveSection("Properties")}
               onOpenSection={setActiveSection}
             />
@@ -679,6 +674,7 @@ export default function DashboardPage() {
               organisationId={data.organisation?.id ?? ""}
               currency={data.organisation?.currency ?? "RWF"}
               role={data.role}
+              userId={data.user.id}
               onUpdated={() => setRefreshKey((key) => key + 1)}
             />
           )}
@@ -748,12 +744,14 @@ function Overview({
   data,
   unitCount,
   overview,
+  canAddProperty,
   onOpenProperties,
   onOpenSection,
 }: {
   data: DashboardData;
   unitCount: number;
   overview: OverviewData | null;
+  canAddProperty: boolean;
   onOpenProperties: () => void;
   onOpenSection: (section: SectionName) => void;
 }) {
@@ -813,14 +811,16 @@ function Overview({
           </h1>
           <p>Here&apos;s what&apos;s happening with your properties.</p>
         </div>
-        <button
-          type="button"
-          className="dashboard-primary-button"
-          onClick={onOpenProperties}
-        >
-          <Plus size={16} />
-          Add property
-        </button>
+        {canAddProperty && (
+          <button
+            type="button"
+            className="dashboard-primary-button"
+            onClick={onOpenProperties}
+          >
+            <Plus size={16} />
+            Add property
+          </button>
+        )}
       </div>
 
       <section className="dashboard-metrics" aria-label="Portfolio summary">

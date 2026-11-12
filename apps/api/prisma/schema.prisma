@@ -280,6 +280,8 @@ model User {
   notifications               Notification[]
   auditLogs                   AuditLog[]
   authSessions                AuthSession[]
+  passwordResetTokens         PasswordResetToken[]
+  sentOrganisationInvitations OrganisationInvitation[] @relation("OrganisationInvitationSender")
 
   @@map("users")
 }
@@ -303,6 +305,7 @@ model Organisation {
   payments      Payment[]
   notifications Notification[]
   auditLogs     AuditLog[]
+  invitations   OrganisationInvitation[]
 
   @@index([ownerUserId])
   @@map("organisations")
@@ -404,12 +407,14 @@ model Property {
   type           PropertyType
   address        String         @db.VarChar(500)
   description    String?        @db.Text
+  photoFileId    String?        @map("photo_file_id") @db.Uuid
   status         PropertyStatus @default(ACTIVE)
   createdAt      DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt      DateTime       @updatedAt @map("updated_at") @db.Timestamptz(6)
   organisation   Organisation   @relation(fields: [organisationId], references: [id], onDelete: Cascade)
   owner          User?          @relation("PropertyOwner", fields: [ownerId], references: [id], onDelete: SetNull)
   propertyOwner  PropertyOwner? @relation(fields: [propertyOwnerId], references: [id], onDelete: Restrict)
+  photoFile      StoredFile?    @relation("PropertyPhoto", fields: [photoFileId], references: [id], onDelete: SetNull)
   assignments    PropertyAssignment[]
   units          Unit[]
   expenses       Expense[]
@@ -483,6 +488,7 @@ model Tenant {
   email                 String?              @db.VarChar(320)
   emergencyContactName  String?              @map("emergency_contact_name") @db.VarChar(180)
   emergencyContactPhone String?              @map("emergency_contact_phone") @db.VarChar(32)
+  archivedAt            DateTime?            @map("archived_at") @db.Timestamptz(6)
   createdAt             DateTime             @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt             DateTime             @updatedAt @map("updated_at") @db.Timestamptz(6)
   organisation          Organisation         @relation(fields: [organisationId], references: [id], onDelete: Cascade)
@@ -841,6 +847,7 @@ model StoredFile {
   utilityEvidence           UtilityBill[]         @relation("UtilityEvidence")
   maintenanceInvoices       MaintenanceExpense[]  @relation("MaintenanceInvoice")
   subscriptionPaymentProofs SubscriptionPayment[] @relation("SubscriptionPaymentProof")
+  propertyPhotos            Property[]             @relation("PropertyPhoto")
 
   @@unique([organisationId, storageKey])
   @@index([organisationId, accessClassification])
@@ -878,4 +885,36 @@ model AuthSession {
   @@index([tokenFamilyId])
   @@index([expiresAt])
   @@map("auth_sessions")
+}
+
+model PasswordResetToken {
+  id        String    @id @default(uuid()) @db.Uuid
+  userId    String    @map("user_id") @db.Uuid
+  tokenHash String    @unique @map("token_hash") @db.VarChar(64)
+  expiresAt DateTime  @map("expires_at") @db.Timestamptz(6)
+  usedAt    DateTime? @map("used_at") @db.Timestamptz(6)
+  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+  @@map("password_reset_tokens")
+}
+
+model OrganisationInvitation {
+  id              String         @id @default(uuid()) @db.Uuid
+  organisationId  String         @map("organisation_id") @db.Uuid
+  invitedByUserId String         @map("invited_by_user_id") @db.Uuid
+  email           String         @db.VarChar(320)
+  role            MembershipRole
+  propertyIds     String[]       @default([]) @map("property_ids") @db.Uuid
+  tokenHash       String         @unique @map("token_hash") @db.VarChar(64)
+  expiresAt       DateTime       @map("expires_at") @db.Timestamptz(6)
+  acceptedAt      DateTime?      @map("accepted_at") @db.Timestamptz(6)
+  createdAt       DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  organisation    Organisation   @relation(fields: [organisationId], references: [id], onDelete: Cascade)
+  invitedBy       User           @relation("OrganisationInvitationSender", fields: [invitedByUserId], references: [id], onDelete: Cascade)
+
+  @@unique([organisationId, email])
+  @@index([email, expiresAt])
+  @@map("organisation_invitations")
 }

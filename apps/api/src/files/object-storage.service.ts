@@ -166,6 +166,7 @@ export class ObjectStorageService {
     userId: string,
     fileId: string,
     role?: MembershipRole,
+    preview = false,
   ): Promise<{ downloadUrl: string; expiresIn: number }> {
     if (
       role !== MembershipRole.OWNER &&
@@ -227,6 +228,14 @@ export class ObjectStorageService {
                     },
                   },
                 },
+                {
+                  propertyPhotos: {
+                    some: {
+                      organisationId,
+                      assignments: { some: { userId } },
+                    },
+                  },
+                },
               ],
             }
           : role === MembershipRole.ACCOUNTANT
@@ -251,9 +260,27 @@ export class ObjectStorageService {
                       },
                     },
                   },
+                  {
+                    propertyPhotos: {
+                      some: { organisationId },
+                    },
+                  },
                 ],
               }
             : {}),
+        ...(preview
+          ? {
+              mimeType: { startsWith: 'image/' },
+              propertyPhotos: {
+                some: {
+                  organisationId,
+                  ...(role === MembershipRole.MANAGER
+                    ? { assignments: { some: { userId } } }
+                    : {}),
+                },
+              },
+            }
+          : {}),
       },
       select: { storageKey: true, fileName: true },
     });
@@ -271,19 +298,21 @@ export class ObjectStorageService {
       new GetObjectCommand({
         Bucket: bucket,
         Key: file.storageKey,
-        ResponseContentDisposition: `attachment; filename*=UTF-8''${encodeURIComponent(file.fileName)}`,
+        ResponseContentDisposition: `${preview ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(file.fileName)}`,
       }),
       { expiresIn: downloadUrlLifetimeSeconds },
     );
-    await this.prisma.auditLog.create({
-      data: {
-        organisationId,
-        userId,
-        action: 'file.download_url_created',
-        entityType: 'file',
-        entityId: fileId,
-      },
-    });
+    if (!preview) {
+      await this.prisma.auditLog.create({
+        data: {
+          organisationId,
+          userId,
+          action: 'file.download_url_created',
+          entityType: 'file',
+          entityId: fileId,
+        },
+      });
+    }
     return { downloadUrl, expiresIn: downloadUrlLifetimeSeconds };
   }
 }

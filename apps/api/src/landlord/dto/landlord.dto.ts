@@ -57,6 +57,11 @@ export class PropertyInput {
   @IsString()
   @Matches(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
   propertyOwnerId?: string;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
+  photoFileId?: string;
 }
 
 export class PropertyUpdateInput {
@@ -89,6 +94,11 @@ export class PropertyUpdateInput {
   @IsOptional()
   @IsEnum(PropertyStatus)
   status?: PropertyStatus;
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
+  photoFileId?: string | null;
 }
 
 export class UnitInput {

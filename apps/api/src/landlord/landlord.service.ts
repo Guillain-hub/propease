@@ -3,8 +3,11 @@ import {
   ConflictException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import {
   BillingCycle,
   DepositStatus,
@@ -21,8 +24,9 @@ import {
   TenancyStatus,
   UnitStatus,
 } from '@prisma/client';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { PrismaService } from '../database/prisma.service.js';
+import { EmailService } from '../email/email.service.js';
 import {
   ChargeInput,
   DepositTransactionInput,
@@ -71,8 +75,6 @@ const ownershipManagers = new Set<MembershipRole>([
 
 const restrictedAdminGrants = new Set<MembershipRole>([
   MembershipRole.ADMIN,
-  MembershipRole.ACCOUNTANT,
-  MembershipRole.MAINTENANCE_STAFF,
 ]);
 
 function assertCanManage(role: MembershipRole | undefined): void {
@@ -183,7 +185,121 @@ function isUniqueConflict(error: unknown): boolean {
 
 @Injectable()
 export class LandlordService {
-  constructor(private readonly prisma: PrismaService) {}
+  private readonly logger = new Logger(LandlordService.name);
+  private readonly tenancyStatusSyncs = new Map<string, Promise<void>>();
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly email: EmailService,
+    private readonly config: ConfigService,
+  ) {}
+
+  private syncTenancyStatuses(
+    organisationId: string,
+    role?: MembershipRole,
+    userId?: string,
+  ): Promise<void> {
+    const syncKey = `${organisationId}:${role ?? ''}:${userId ?? ''}`;
+    const existingSync = this.tenancyStatusSyncs.get(syncKey);
+    if (existingSync) return existingSync;
+
+    const today = dateOnly(new Date().toISOString());
+    const tenancyScope = tenancyPropertyScope(organisationId, role, userId);
+    const sync = this.prisma.$transaction(async (transaction) => {
+      const endedTenancies = await transaction.tenancy.findMany({
+        where: {
+          ...tenancyScope,
+          status: { in: [TenancyStatus.UPCOMING, TenancyStatus.ACTIVE] },
+          moveOutDate: { lte: today },
+        },
+        select: { id: true, unitId: true },
+      });
+      const activeTenancies = await transaction.tenancy.findMany({
+        where: {
+          ...tenancyScope,
+          status: TenancyStatus.UPCOMING,
+          moveInDate: { lte: today },
+          OR: [{ moveOutDate: null }, { moveOutDate: { gt: today } }],
+        },
+        select: { id: true, unitId: true },
+      });
+
+      const endedIds = endedTenancies.map(({ id }) => id);
+      if (endedIds.length > 0) {
+        await transaction.tenancy.updateMany({
+          where: { id: { in: endedIds } },
+          data: { status: TenancyStatus.ENDED },
+        });
+        await transaction.lease.updateMany({
+          where: { tenancyId: { in: endedIds }, status: LeaseStatus.ACTIVE },
+          data: {
+            status: LeaseStatus.TERMINATED,
+            terminatedAt: new Date(),
+            terminationReason: 'Tenancy move-out date reached',
+          },
+        });
+      }
+
+      const activeIds = activeTenancies.map(({ id }) => id);
+      if (activeIds.length > 0) {
+        await transaction.tenancy.updateMany({
+          where: { id: { in: activeIds }, status: TenancyStatus.UPCOMING },
+          data: { status: TenancyStatus.ACTIVE },
+        });
+      }
+
+      const affectedUnitIds = new Set([
+        ...endedTenancies.map(({ unitId }) => unitId),
+        ...activeTenancies.map(({ unitId }) => unitId),
+      ]);
+      if (affectedUnitIds.size > 0) {
+        const currentTenancies = await transaction.tenancy.findMany({
+          where: {
+            unitId: { in: [...affectedUnitIds] },
+            status: TenancyStatus.ACTIVE,
+            moveInDate: { lte: today },
+            OR: [{ moveOutDate: null }, { moveOutDate: { gt: today } }],
+          },
+          select: { unitId: true },
+        });
+        const occupiedUnitIds = new Set(currentTenancies.map(({ unitId }) => unitId));
+        const availableUnitIds = [...affectedUnitIds].filter((id) => !occupiedUnitIds.has(id));
+        if (occupiedUnitIds.size > 0) {
+          await transaction.unit.updateMany({
+            where: {
+              id: { in: [...occupiedUnitIds] },
+              status: { not: UnitStatus.ARCHIVED },
+            },
+            data: { status: UnitStatus.OCCUPIED },
+          });
+        }
+        if (availableUnitIds.length > 0) {
+          await transaction.unit.updateMany({
+            where: {
+              id: { in: availableUnitIds },
+              status: UnitStatus.OCCUPIED,
+            },
+            data: { status: UnitStatus.AVAILABLE },
+          });
+        }
+      }
+    }, { maxWait: 10_000, timeout: 20_000 });
+
+    this.tenancyStatusSyncs.set(syncKey, sync);
+    void sync.then(
+      () => {
+        if (this.tenancyStatusSyncs.get(syncKey) === sync) {
+          this.tenancyStatusSyncs.delete(syncKey);
+        }
+      },
+      () => {
+        if (this.tenancyStatusSyncs.get(syncKey) === sync) {
+          this.tenancyStatusSyncs.delete(syncKey);
+        }
+      },
+    );
+    return sync;
+  }
 
   async dashboard(
     organisationId: string,
@@ -193,6 +309,7 @@ export class LandlordService {
     await this.prisma.$transaction((transaction) =>
       ensureTrialSubscription(transaction, organisationId),
     );
+    await this.syncTenancyStatuses(organisationId, role, userId);
     const assignedPropertyIds =
       role === MembershipRole.MANAGER && userId
         ? (
@@ -229,6 +346,7 @@ export class LandlordService {
       this.prisma.tenant.count({
         where: {
           organisationId,
+          archivedAt: null,
           ...(role === MembershipRole.MANAGER
             ? {
                 tenancies: {
@@ -379,6 +497,7 @@ export class LandlordService {
           type: true,
           address: true,
           description: true,
+          photoFileId: true,
           status: true,
           createdAt: true,
           propertyOwner:
@@ -495,10 +614,23 @@ export class LandlordService {
       if (!owner) throw new NotFoundException('Property owner was not found in this organisation');
     }
     const property = await this.prisma.$transaction(async (transaction) => {
+      if (input.photoFileId) {
+        const photo = await transaction.storedFile.findFirst({
+          where: {
+            id: input.photoFileId,
+            organisationId,
+            uploadStatus: 'UPLOADED',
+            mimeType: { startsWith: 'image/' },
+          },
+          select: { id: true },
+        });
+        if (!photo) throw new BadRequestException('Select a successfully uploaded image for the property photo');
+      }
       const created = await transaction.property.create({
         data: {
           organisationId,
           propertyOwnerId: input.propertyOwnerId,
+          photoFileId: input.photoFileId,
           name: input.name.trim(),
           type: input.type,
           address: input.address.trim(),
@@ -542,6 +674,18 @@ export class LandlordService {
         select: { id: true },
       });
       if (!existing) throw new NotFoundException('Property was not found in this organisation');
+      if (input.photoFileId) {
+        const photo = await transaction.storedFile.findFirst({
+          where: {
+            id: input.photoFileId,
+            organisationId,
+            uploadStatus: 'UPLOADED',
+            mimeType: { startsWith: 'image/' },
+          },
+          select: { id: true },
+        });
+        if (!photo) throw new BadRequestException('Select a successfully uploaded image for the property photo');
+      }
       if (input.status === 'ARCHIVED') {
         const activeTenancy = await transaction.tenancy.findFirst({
           where: {
@@ -560,6 +704,7 @@ export class LandlordService {
           address: input.address?.trim(),
           description: input.description === undefined ? undefined : input.description.trim() || null,
           propertyOwnerId: input.propertyOwnerId === undefined ? undefined : input.propertyOwnerId,
+          photoFileId: input.photoFileId,
           status: input.status,
         },
       });
@@ -576,13 +721,19 @@ export class LandlordService {
     role?: MembershipRole,
     userId?: string,
   ) {
+    await this.syncTenancyStatuses(organisationId, role, userId);
+    const today = dateOnly(new Date().toISOString());
     return {
       units: await this.prisma.unit.findMany({
         where: { property: propertyScopeWhere(organisationId, role, userId) },
         include: {
           property: { select: { id: true, name: true } },
           tenancies: {
-            where: { status: { in: [TenancyStatus.UPCOMING, TenancyStatus.ACTIVE] } },
+            where: {
+              status: TenancyStatus.ACTIVE,
+              moveInDate: { lte: today },
+              OR: [{ moveOutDate: null }, { moveOutDate: { gt: today } }],
+            },
             select: { id: true, tenant: { select: { id: true, legalName: true } } },
             take: 1,
           },
@@ -739,11 +890,62 @@ export class LandlordService {
     }
   }
 
+  async archiveUnit(
+    organisationId: string,
+    userId: string,
+    role: MembershipRole | undefined,
+    unitId: string,
+  ) {
+    if (role !== MembershipRole.ADMIN) {
+      throw new ForbiddenException('Only administrators can archive units');
+    }
+    await this.syncTenancyStatuses(organisationId, role, userId);
+    const today = dateOnly(new Date().toISOString());
+    return this.prisma.$transaction(async (transaction) => {
+      const unit = await transaction.unit.findFirst({
+        where: { id: unitId, property: { organisationId } },
+        select: { id: true, status: true },
+      });
+      if (!unit) throw new NotFoundException('Unit was not found in this organisation');
+      if (unit.status === UnitStatus.ARCHIVED) {
+        throw new ConflictException('This unit is already archived');
+      }
+      const tenancy = await transaction.tenancy.findFirst({
+        where: {
+          unitId,
+          OR: [
+            {
+              status: TenancyStatus.UPCOMING,
+              moveInDate: { gt: today },
+            },
+            {
+              status: TenancyStatus.ACTIVE,
+              moveInDate: { lte: today },
+              AND: [{ OR: [{ moveOutDate: null }, { moveOutDate: { gt: today } }] }],
+            },
+          ],
+        },
+        select: { id: true },
+      });
+      if (tenancy) {
+        throw new ConflictException('Move out current and scheduled tenants before archiving this unit');
+      }
+      const archived = await transaction.unit.update({
+        where: { id: unitId },
+        data: { status: UnitStatus.ARCHIVED },
+      });
+      await addAudit(transaction, organisationId, userId, 'unit.archived', 'unit', unitId);
+      return { unit: archived };
+    });
+  }
+
   async listTenants(
     organisationId: string,
     role?: MembershipRole,
     userId?: string,
   ) {
+    await this.syncTenancyStatuses(organisationId, role, userId);
+    const today = dateOnly(new Date().toISOString());
     return {
       tenants: await this.prisma.tenant.findMany({
         where: {
@@ -774,6 +976,14 @@ export class LandlordService {
           tenancies: {
             where: {
               status: { in: [TenancyStatus.UPCOMING, TenancyStatus.ACTIVE] },
+              OR: [
+                { status: TenancyStatus.UPCOMING, moveInDate: { gt: today } },
+                {
+                  status: TenancyStatus.ACTIVE,
+                  moveInDate: { lte: today },
+                  AND: [{ OR: [{ moveOutDate: null }, { moveOutDate: { gt: today } }] }],
+                },
+              ],
               ...(role === MembershipRole.MANAGER
                 ? { unit: { property: propertyScopeWhere(organisationId, role, userId) } }
                 : {}),
@@ -782,8 +992,16 @@ export class LandlordService {
               id: true,
               status: true,
               moveInDate: true,
-              unit: { select: { id: true, unitNumber: true, property: { select: { name: true } } } },
+              moveOutDate: true,
+              unit: {
+                select: {
+                  id: true,
+                  unitNumber: true,
+                  property: { select: { id: true, name: true } },
+                },
+              },
             },
+            orderBy: { moveInDate: 'asc' },
             take: 1,
           },
         },
@@ -814,6 +1032,52 @@ export class LandlordService {
       return created;
     });
     return { tenant };
+  }
+
+  async archiveTenant(
+    organisationId: string,
+    userId: string,
+    role: MembershipRole | undefined,
+    tenantId: string,
+  ) {
+    if (role !== MembershipRole.ADMIN) {
+      throw new ForbiddenException('Only administrators can archive tenants');
+    }
+    await this.syncTenancyStatuses(organisationId, role, userId);
+    const today = dateOnly(new Date().toISOString());
+    return this.prisma.$transaction(async (transaction) => {
+      const tenant = await transaction.tenant.findFirst({
+        where: { id: tenantId, organisationId, archivedAt: null },
+        select: { id: true },
+      });
+      if (!tenant) throw new NotFoundException('Tenant was not found in this organisation');
+      const currentTenancy = await transaction.tenancy.findFirst({
+        where: {
+          tenantId,
+          OR: [
+            {
+              status: TenancyStatus.UPCOMING,
+              moveInDate: { gt: today },
+            },
+            {
+              status: TenancyStatus.ACTIVE,
+              moveInDate: { lte: today },
+              AND: [{ OR: [{ moveOutDate: null }, { moveOutDate: { gt: today } }] }],
+            },
+          ],
+        },
+        select: { id: true },
+      });
+      if (currentTenancy) {
+        throw new ConflictException('Record move-out before archiving this tenant');
+      }
+      const archived = await transaction.tenant.update({
+        where: { id: tenantId },
+        data: { archivedAt: new Date() },
+      });
+      await addAudit(transaction, organisationId, userId, 'tenant.archived', 'tenant', tenantId);
+      return { tenant: archived };
+    });
   }
 
   async updateTenant(
@@ -872,6 +1136,7 @@ export class LandlordService {
     role?: MembershipRole,
     userId?: string,
   ) {
+    await this.syncTenancyStatuses(organisationId, role, userId);
     return {
       tenancies: await this.prisma.tenancy.findMany({
         where: tenancyPropertyScope(organisationId, role, userId),
@@ -907,7 +1172,9 @@ export class LandlordService {
     }
     const tenancy = await this.prisma.$transaction(async (transaction) => {
       const [tenant, unit] = await Promise.all([
-        transaction.tenant.findFirst({ where: { id: input.tenantId, organisationId } }),
+        transaction.tenant.findFirst({
+          where: { id: input.tenantId, organisationId, archivedAt: null },
+        }),
         transaction.unit.findFirst({
           where: {
             id: input.unitId,
@@ -1013,7 +1280,12 @@ export class LandlordService {
         where: {
           unitId: existing.unitId,
           id: { not: tenancyId },
-          status: { in: [TenancyStatus.UPCOMING, TenancyStatus.ACTIVE] },
+          status: TenancyStatus.ACTIVE,
+          moveInDate: { lte: dateOnly(new Date().toISOString()) },
+          OR: [
+            { moveOutDate: null },
+            { moveOutDate: { gt: dateOnly(new Date().toISOString()) } },
+          ],
         },
       });
       if (hasMovedOut && !otherCurrentTenancy) {
@@ -2323,8 +2595,9 @@ export class LandlordService {
   }
 
   async getTeam(organisationId: string) {
-    return {
-      members: await this.prisma.organisationMember.findMany({
+    const now = new Date();
+    const [members, invitations] = await Promise.all([
+      this.prisma.organisationMember.findMany({
         where: { organisationId },
         include: {
           user: {
@@ -2343,6 +2616,35 @@ export class LandlordService {
         },
         orderBy: [{ role: 'asc' }, { invitedAt: 'asc' }],
       }),
+      this.prisma.organisationInvitation.findMany({
+        where: { organisationId, acceptedAt: null, expiresAt: { gt: now } },
+        select: {
+          id: true,
+          email: true,
+          role: true,
+          createdAt: true,
+          expiresAt: true,
+        },
+        orderBy: { createdAt: 'asc' },
+      }),
+    ]);
+    return {
+      members: [
+        ...members,
+        ...invitations.map((invitation) => ({
+          id: invitation.id,
+          role: invitation.role,
+          status: MembershipStatus.INVITED,
+          invitedAt: invitation.createdAt,
+          expiresAt: invitation.expiresAt,
+          user: {
+            id: invitation.id,
+            name: invitation.email,
+            email: invitation.email,
+            propertyAssignments: [],
+          },
+        })),
+      ],
     };
   }
 
@@ -2365,13 +2667,102 @@ export class LandlordService {
     if (input.role !== MembershipRole.MANAGER && input.propertyIds?.length) {
       throw new BadRequestException('Property assignments are only valid for property managers');
     }
+    if (
+      role === MembershipRole.MANAGER ||
+      (role === MembershipRole.ADMIN && restrictedAdminGrants.has(input.role))
+    ) {
+      throw new ForbiddenException('Your role cannot grant that team permission');
+    }
+    const email = input.email.trim().toLowerCase();
     const target = await this.prisma.user.findUnique({
-      where: { email: input.email.trim().toLowerCase() },
+      where: { email },
       select: { id: true },
     });
+    const sender = await this.prisma.user.findUniqueOrThrow({
+      where: { id: userId },
+      select: { name: true },
+    });
+    const organisation = await this.prisma.organisation.findUniqueOrThrow({
+      where: { id: organisationId },
+      select: { name: true },
+    });
+    const appUrl =
+      this.config.get<string>('WEB_APP_URL')?.trim() ||
+      this.config.getOrThrow<string>('APP_ORIGINS').split(',')[0].trim();
+
     if (!target) {
-      throw new NotFoundException('The collaborator must create a PropEase account before being invited');
+      const propertyIds = input.propertyIds ?? [];
+      if (propertyIds.length) {
+        const properties = await this.prisma.property.findMany({
+          where: { organisationId, id: { in: propertyIds } },
+          select: { id: true },
+        });
+        if (properties.length !== propertyIds.length) {
+          throw new NotFoundException(
+            'One or more assigned properties were not found in this organisation',
+          );
+        }
+      }
+      const token = randomBytes(32).toString('hex');
+      const invitation = await this.prisma.$transaction(async (transaction) => {
+        const created = await transaction.organisationInvitation.upsert({
+          where: { organisationId_email: { organisationId, email } },
+          create: {
+            organisationId,
+            invitedByUserId: userId,
+            email,
+            role: input.role,
+            propertyIds,
+            tokenHash: this.hashInvitationToken(token),
+            expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+          },
+          update: {
+            invitedByUserId: userId,
+            role: input.role,
+            propertyIds,
+            tokenHash: this.hashInvitationToken(token),
+            expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+            acceptedAt: null,
+          },
+          select: { id: true },
+        });
+        await transaction.auditLog.create({
+          data: {
+            organisationId,
+            userId,
+            action: 'team.member_invited',
+            entityType: 'organisation_invitation',
+            entityId: created.id,
+          },
+        });
+        return created;
+      });
+      const invitationUrl = new URL('/register', appUrl);
+      invitationUrl.searchParams.set('invitation', token);
+      try {
+        await this.email.send(
+          email,
+          `Invitation to join ${organisation.name} on PropEase`,
+          [
+            `${sender.name} invited you to join ${organisation.name} on PropEase as ${input.role}.`,
+            '',
+            `Create your account using this link within 7 days: ${invitationUrl.toString()}`,
+            '',
+            'This invitation is intended only for the recipient of this email.',
+          ].join('\n'),
+        );
+      } catch (error) {
+        this.logger.error(
+          `Invitation email could not be sent for organisation ${organisationId}`,
+          error instanceof Error ? error.stack : undefined,
+        );
+        throw new ServiceUnavailableException(
+          'The invitation was saved, but its email could not be sent. Check SMTP settings and retry the invitation.',
+        );
+      }
+      return { invitation: { id: invitation.id, email, role: input.role } };
     }
+
     if (target.id === userId) throw new BadRequestException('You cannot invite yourself');
     const member = await this.prisma.$transaction(async (transaction) => {
       const existing = await transaction.organisationMember.findUnique({
@@ -2380,12 +2771,6 @@ export class LandlordService {
       });
       if (existing?.status === MembershipStatus.ACTIVE) {
         throw new ConflictException('This user is already an active team member');
-      }
-      if (
-        role === MembershipRole.MANAGER ||
-        (role === MembershipRole.ADMIN && restrictedAdminGrants.has(input.role))
-      ) {
-        throw new ForbiddenException('Your role cannot grant that team permission');
       }
       const created = await transaction.organisationMember.upsert({
         where: { organisationId_userId: { organisationId, userId: target.id } },
@@ -2416,7 +2801,30 @@ export class LandlordService {
       });
       return created;
     });
+    try {
+      await this.email.send(
+        email,
+        `Invitation to join ${organisation.name} on PropEase`,
+        [
+          `${sender.name} invited you to join ${organisation.name} on PropEase as ${input.role}.`,
+          '',
+          `Sign in to PropEase to accept the invitation: ${new URL('/login', appUrl).toString()}`,
+        ].join('\n'),
+      );
+    } catch (error) {
+      this.logger.error(
+        `Invitation email could not be sent for organisation ${organisationId}`,
+        error instanceof Error ? error.stack : undefined,
+      );
+      throw new ServiceUnavailableException(
+        'The invitation was saved, but its email could not be sent. Check SMTP settings and retry the invitation.',
+      );
+    }
     return { member };
+  }
+
+  private hashInvitationToken(token: string): string {
+    return createHash('sha256').update(token).digest('hex');
   }
 
   async changeTeamRole(
@@ -2427,6 +2835,9 @@ export class LandlordService {
     input: TeamRoleInput,
   ) {
     assertCanManage(role);
+    if (memberId === userId) {
+      throw new BadRequestException('You cannot change your own team role');
+    }
     if (input.role === MembershipRole.OWNER) {
       throw new BadRequestException('Use organisation ownership transfer to change an owner');
     }
@@ -2446,6 +2857,9 @@ export class LandlordService {
       if (!existing) throw new NotFoundException('Team member was not found in this organisation');
       if (existing.role === MembershipRole.OWNER) {
         throw new ForbiddenException('The organisation owner role cannot be changed here');
+      }
+      if (role === MembershipRole.ADMIN && existing.role === MembershipRole.ADMIN) {
+        throw new ForbiddenException('Administrators cannot change another administrator role');
       }
       if (input.role === MembershipRole.MANAGER && existing.role !== MembershipRole.MANAGER && !input.propertyIds?.length) {
         throw new BadRequestException('Assign at least one property to a property manager');
@@ -2474,6 +2888,80 @@ export class LandlordService {
       return updated;
     });
     return { member };
+  }
+
+  async removeTeamMember(
+    organisationId: string,
+    userId: string,
+    role: MembershipRole | undefined,
+    memberId: string,
+  ) {
+    assertCanManage(role);
+    if (memberId === userId) {
+      throw new BadRequestException('You cannot remove yourself from the organisation');
+    }
+
+    return this.prisma.$transaction(async (transaction) => {
+      const existing = await transaction.organisationMember.findUnique({
+        where: { organisationId_userId: { organisationId, userId: memberId } },
+      });
+
+      if (existing) {
+        if (
+          existing.role === MembershipRole.OWNER ||
+          (role === MembershipRole.ADMIN && existing.role === MembershipRole.ADMIN)
+        ) {
+          throw new ForbiddenException('Your role cannot remove this team member');
+        }
+        const member = await transaction.organisationMember.update({
+          where: { organisationId_userId: { organisationId, userId: memberId } },
+          data: { status: MembershipStatus.SUSPENDED },
+          include: { user: { select: { id: true, name: true, email: true } } },
+        });
+        await transaction.propertyAssignment.deleteMany({
+          where: { userId: memberId, property: { organisationId } },
+        });
+        await addAudit(
+          transaction,
+          organisationId,
+          userId,
+          'team.member_suspended',
+          'organisation_member',
+          memberId,
+        );
+        return { member };
+      }
+
+      const invitation = await transaction.organisationInvitation.findFirst({
+        where: {
+          id: memberId,
+          organisationId,
+          acceptedAt: null,
+        },
+        select: { id: true, role: true },
+      });
+      if (!invitation) {
+        throw new NotFoundException('Team member was not found in this organisation');
+      }
+      if (
+        invitation.role === MembershipRole.OWNER ||
+        (role === MembershipRole.ADMIN && invitation.role === MembershipRole.ADMIN)
+      ) {
+        throw new ForbiddenException('Your role cannot remove this team member');
+      }
+      await transaction.organisationInvitation.delete({
+        where: { id: invitation.id },
+      });
+      await addAudit(
+        transaction,
+        organisationId,
+        userId,
+        'team.invitation_revoked',
+        'organisation_invitation',
+        invitation.id,
+      );
+      return { invitation: { id: invitation.id, status: 'REVOKED' } };
+    });
   }
 
   async acceptTeamInvitation(organisationId: string, userId: string) {

@@ -60,4 +60,30 @@ describe('ObjectStorageService role access', () => {
     ).rejects.toBeInstanceOf(ForbiddenException);
     expect(findFirst).not.toHaveBeenCalled();
   });
+
+  it('only creates preview URLs for photos attached to this organisation', async () => {
+    const findFirst = vi.fn().mockResolvedValue(null);
+    const storage = storageFor(findFirst);
+
+    await expect(
+      storage.createDownloadUrl(
+        'org-1',
+        'manager-1',
+        'file-1',
+        MembershipRole.MANAGER,
+        true,
+      ),
+    ).rejects.toThrow('Uploaded file was not found');
+
+    const where = findFirst.mock.calls[0][0].where;
+    expect(where).toEqual(expect.objectContaining({
+      mimeType: { startsWith: 'image/' },
+      propertyPhotos: {
+        some: {
+          organisationId: 'org-1',
+          assignments: { some: { userId: 'manager-1' } },
+        },
+      },
+    }));
+  });
 });

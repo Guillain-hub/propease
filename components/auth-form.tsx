@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 
 type AuthFormProps = { mode: "login" | "register" };
@@ -15,7 +15,95 @@ export function AuthForm({ mode }: AuthFormProps) {
   const router = useRouter();
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
+  const [invitationToken, setInvitationToken] = useState<string | null>(null);
+  const formRef = useRef<HTMLFormElement>(null);
   const isRegister = mode === "register";
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (isRegister) setInvitationToken(params.get("invitation"));
+    if (params.get("authError") === "google") {
+      setFeedback({
+        kind: "error",
+        message:
+          "Google sign-in could not be completed. Try again, or use your email and password.",
+      });
+    }
+  }, [isRegister]);
+
+  async function continueWithGoogle() {
+    if (isSubmitting) return;
+    const form = formRef.current;
+    const values = form ? new FormData(form) : null;
+    const currentInvitation =
+      invitationToken ??
+      new URLSearchParams(window.location.search).get("invitation");
+    const payload = {
+      flow: isRegister ? "register" : "login",
+      ...(isRegister
+        ? {
+            name: String(values?.get("name") ?? "").trim(),
+            ...(currentInvitation
+              ? { invitationToken: currentInvitation }
+              : {
+                  organisationName: String(
+                    values?.get("organisationName") ?? "",
+                  ).trim(),
+                  organisationType: String(
+                    values?.get("organisationType") ?? "",
+                  ),
+                }),
+          }
+        : {}),
+    };
+
+    if (isRegister) {
+      const requiredFields = currentInvitation
+        ? ["auth-name"]
+        : ["auth-name", "auth-organisation", "auth-organisation-type"];
+      const invalid = requiredFields
+        .map((id) => form?.querySelector<HTMLInputElement | HTMLSelectElement>(`#${id}`))
+        .find((field) => !field || !field.checkValidity());
+      if (invalid) {
+        invalid?.reportValidity();
+        return;
+      }
+    }
+
+    setIsSubmitting(true);
+    setFeedback(null);
+    try {
+      const response = await fetch(`${apiBaseUrl}/auth/google/start`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const result = (await response.json()) as ApiError & {
+        authorizationUrl?: string;
+      };
+      if (!response.ok || !result.authorizationUrl) {
+        const apiMessage = Array.isArray(result.message)
+          ? result.message.join(". ")
+          : result.message;
+        throw new Error(
+          apiMessage || "Google sign-in is currently unavailable.",
+        );
+      }
+      window.location.assign(result.authorizationUrl);
+    } catch (error) {
+      setFeedback({
+        kind: "error",
+        message:
+          error instanceof TypeError
+            ? "Couldn't reach the PropEase API. Make sure it is running and try again."
+            : error instanceof Error
+              ? error.message
+              : "Google sign-in could not be started.",
+      });
+      setIsSubmitting(false);
+    }
+  }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -40,10 +128,14 @@ export function AuthForm({ mode }: AuthFormProps) {
           name: String(formData.get("name") ?? "").trim(),
           email: String(formData.get("email") ?? "").trim(),
           password,
-          organisationName: String(
-            formData.get("organisationName") ?? "",
-          ).trim(),
-          organisationType: String(formData.get("organisationType") ?? ""),
+          ...(invitationToken
+            ? { invitationToken }
+            : {
+                organisationName: String(
+                  formData.get("organisationName") ?? "",
+                ).trim(),
+                organisationType: String(formData.get("organisationType") ?? ""),
+              }),
         }
       : {
           email: String(formData.get("email") ?? "").trim(),
@@ -99,7 +191,7 @@ export function AuthForm({ mode }: AuthFormProps) {
   }
 
   return (
-    <form className="auth-form" onSubmit={handleSubmit}>
+    <form className="auth-form" onSubmit={handleSubmit} ref={formRef}>
       {isRegister && (
         <>
           <div className="form-field">
@@ -114,6 +206,13 @@ export function AuthForm({ mode }: AuthFormProps) {
               required
             />
           </div>
+          {invitationToken ? (
+            <p className="auth-intro">
+              You were invited to a landlord workspace. Register with the email
+              address that received the invitation to join it.
+            </p>
+          ) : (
+            <>
           <div className="form-field">
             <label htmlFor="auth-organisation">Organisation name <span className="required-field-marker" aria-hidden="true">*</span></label>
             <input
@@ -140,10 +239,22 @@ export function AuthForm({ mode }: AuthFormProps) {
               </option>
             </select>
           </div>
+            </>
+          )}
         </>
       )}
+      <button
+        type="button"
+        className="auth-google-button"
+        disabled={isSubmitting}
+        onClick={() => void continueWithGoogle()}
+      >
+        <span className="auth-google-mark" aria-hidden="true">G</span>
+        {isSubmitting ? "Connecting to Google..." : "Continue with Google"}
+      </button>
+      <div className="auth-divider"><span>or continue with email</span></div>
       <div className="form-field">
-        <label htmlFor="auth-email">Email address <span className="required-field-marker" aria-hidden="true">*</span></label>
+        <label htmlFor="auth-email">{invitationToken ? "Invited email address" : "Email address"} <span className="required-field-marker" aria-hidden="true">*</span></label>
         <input
           id="auth-email"
           name="email"

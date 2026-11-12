@@ -4,7 +4,9 @@ import {
   Get,
   HttpCode,
   HttpStatus,
+  Logger,
   Post,
+  Query,
   Req,
   Res,
   UseGuards,
@@ -17,17 +19,23 @@ import { CurrentUser } from './current-user.decorator.js';
 import { JwtAccessGuard } from './jwt-access.guard.js';
 import { LoginDto } from './dto/login.dto.js';
 import { RegisterDto } from './dto/register.dto.js';
+import { RequestPasswordResetDto } from './dto/request-password-reset.dto.js';
+import { ResetPasswordDto } from './dto/reset-password.dto.js';
+import { GoogleAuthStartDto } from './dto/google-auth-start.dto.js';
 import type { AccessTokenClaims } from './auth.types.js';
 import type { AuthTokens } from './auth.service.js';
 
 const accessCookie = 'access_token';
 const refreshCookie = 'refresh_token';
+const googleStateCookie = 'google_oauth_state';
 type RequestWithCookies = Request & {
   cookies?: Record<string, string | undefined>;
 };
 
 @Controller('auth')
 export class AuthController {
+  private readonly logger = new Logger(AuthController.name);
+
   constructor(
     private readonly auth: AuthService,
     private readonly config: ConfigService,
@@ -54,6 +62,78 @@ export class AuthController {
     const tokens = await this.auth.login(input);
     this.setCookies(response, tokens);
     return { user: tokens.user };
+  }
+
+  @Post('google/start')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  async startGoogleAuth(
+    @Body() input: GoogleAuthStartDto,
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<{ authorizationUrl: string }> {
+    const result = await this.auth.createGoogleAuthorizationUrl(input);
+    response.cookie(googleStateCookie, result.stateCookie, {
+      httpOnly: true,
+      secure: this.config.get<string>('NODE_ENV') === 'production',
+      sameSite: 'lax',
+      path: '/api/v1/auth/google',
+      maxAge: 5 * 60 * 1000,
+    });
+    return { authorizationUrl: result.authorizationUrl };
+  }
+
+  @Get('google/callback')
+  async googleCallback(
+    @Query('code') code: string | undefined,
+    @Query('state') state: string | undefined,
+    @Query('error') providerError: string | undefined,
+    @Req() request: RequestWithCookies,
+    @Res() response: Response,
+  ): Promise<void> {
+    const cookieOptions = {
+      httpOnly: true,
+      secure: this.config.get<string>('NODE_ENV') === 'production',
+      sameSite: 'lax' as const,
+      path: '/api/v1/auth/google',
+    };
+    response.clearCookie(googleStateCookie, cookieOptions);
+
+    try {
+      if (providerError || !code || !state) {
+        throw new Error('Google sign-in was not completed');
+      }
+      const tokens = await this.auth.authenticateWithGoogle(
+        code,
+        state,
+        request.cookies?.[googleStateCookie],
+      );
+      this.setCookies(response, tokens);
+      response.redirect(302, this.auth.frontendUrl('/dashboard'));
+    } catch {
+      this.logger.warn('Google sign-in failed; redirecting to the login page');
+      response.redirect(
+        302,
+        this.auth.frontendUrl('/login?authError=google'),
+      );
+    }
+  }
+
+  @Post('forgot-password')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 3, ttl: 60_000 } })
+  async forgotPassword(
+    @Body() input: RequestPasswordResetDto,
+  ): Promise<{ message: string }> {
+    return this.auth.requestPasswordReset(input);
+  }
+
+  @Post('reset-password')
+  @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 5, ttl: 60_000 } })
+  async resetPassword(
+    @Body() input: ResetPasswordDto,
+  ): Promise<{ message: string }> {
+    return this.auth.resetPassword(input.token, input.password);
   }
 
   @Post('refresh')

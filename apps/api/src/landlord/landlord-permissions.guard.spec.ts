@@ -85,4 +85,33 @@ describe('LandlordPermissionsGuard', () => {
       ForbiddenException,
     );
   });
+
+  it('prevents managers from accessing expense records', async () => {
+    const guard = new LandlordPermissionsGuard({} as PrismaService);
+    const request = {
+      organisationRole: MembershipRole.MANAGER,
+      user: { sub: 'manager-1' },
+      params: { organisationId: 'org-1' },
+      method: 'GET',
+      baseUrl: '/api/v1/organisations/org-1/landlord',
+      route: { path: '/expenses' },
+    } as Partial<Request>;
+
+    await expect(guard.canActivate(requestContext(request))).rejects.toThrow(
+      'Property managers cannot manage organisation access, billing, owners, or expenses',
+    );
+  });
+
+  it('allows administrators to manage team membership routes', async () => {
+    const guard = new LandlordPermissionsGuard({} as PrismaService);
+    const request = {
+      organisationRole: MembershipRole.ADMIN,
+      params: { organisationId: 'org-1', memberId: 'member-1' },
+      method: 'DELETE',
+      baseUrl: '/api/v1/organisations/org-1/landlord',
+      route: { path: '/team/:memberId' },
+    } as Partial<Request>;
+
+    await expect(guard.canActivate(requestContext(request))).resolves.toBe(true);
+  });
 });

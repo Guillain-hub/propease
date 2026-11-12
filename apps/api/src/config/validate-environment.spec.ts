@@ -31,4 +31,36 @@ describe('validateEnvironment', () => {
       validateEnvironment({ ...validEnvironment, PORT: '70000' }),
     ).toThrow('PORT must be an integer between 1 and 65535');
   });
+
+  it('requires all Google OAuth settings together and validates the callback URL', () => {
+    expect(() =>
+      validateEnvironment({
+        ...validEnvironment,
+        GOOGLE_CLIENT_ID: 'client-id',
+      }),
+    ).toThrow(
+      'Google sign-in requires GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, and GOOGLE_REDIRECT_URI',
+    );
+    expect(() =>
+      validateEnvironment({
+        ...validEnvironment,
+        GOOGLE_CLIENT_ID: 'client-id',
+        GOOGLE_CLIENT_SECRET: 'client-secret',
+        GOOGLE_REDIRECT_URI: 'javascript:alert(1)',
+      }),
+    ).toThrow('GOOGLE_REDIRECT_URI must be a valid HTTP(S) URL');
+    expect(
+      validateEnvironment({
+        ...validEnvironment,
+        GOOGLE_CLIENT_ID: 'client-id',
+        GOOGLE_CLIENT_SECRET: 'client-secret',
+        GOOGLE_REDIRECT_URI:
+          'http://localhost:4000/api/v1/auth/google/callback',
+      }),
+    ).toMatchObject({
+      GOOGLE_CLIENT_ID: 'client-id',
+      GOOGLE_REDIRECT_URI:
+        'http://localhost:4000/api/v1/auth/google/callback',
+    });
+  });
 });

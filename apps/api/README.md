@@ -56,7 +56,7 @@ after changing `APP_ORIGINS`.
   throttling are enabled.
 - Private S3 uploads/downloads use short-lived signed URLs; uploads are checked
   against their declared size and content type before becoming available.
-- BullMQ retries queued transactional email through Amazon SES, and a reusable
+- BullMQ retries queued transactional email through the configured SMTP server, and a reusable
   server-side PDF service is available to domain modules.
 - BullMQ generates monthly rent charges idempotently, marks unpaid charges
   overdue, and queues deduplicated email reminders three days before rent is due.
@@ -118,22 +118,43 @@ npm --prefix apps/api run db:deploy
 The migration adds landlord workflow fields and seeds the trial and paid plans.
 Back up the target database and verify the migration target before applying it;
 this repository change does not apply or deploy migrations automatically.
+Tenant archiving adds a nullable `archived_at` column. Tenant and unit archive
+actions are restricted to users with the Admin role and preserve their
+historical records; records with current or scheduled tenancies cannot be
+archived.
 
 Subscription payment proof is collected, but plan activation still requires an
 administrator verification workflow that is not part of this landlord API.
 Tenant-facing workflows and live payment processing are also outside this
 implementation.
+Password recovery uses a one-hour, single-use token sent through SMTP. Team
+invitations can be sent to people who do not yet have an account; their
+seven-day, single-use registration link adds them directly to the invited
+organisation. Invitations to existing users link them to sign in and accept
+the pending invitation. Set `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`,
+`SMTP_USERNAME`, `SMTP_PASSWORD`, and `EMAIL_FROM_ADDRESS` in the private API
+environment. Set `WEB_APP_URL` to the deployed frontend's public origin so
+email links return to the correct app. The reset flow returns a generic
+response regardless of whether an account exists, stores only a hash of the
+token, and revokes existing sessions when the password changes.
+
+Google sign-in is available to every account role. Existing accounts are
+matched only by Google's verified email; new accounts can create a workspace
+or join a valid invitation. Set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`,
+and `GOOGLE_REDIRECT_URI` in the private API environment. Register the exact
+callback URL with Google OAuth, for example
+`http://localhost:4000/api/v1/auth/google/callback` for local development.
+Email/password sign-in remains available as a fallback.
 
 ## Environment
 
 `DATABASE_URL`, `JWT_ACCESS_SECRET`, and `JWT_REFRESH_SECRET` are required.
-`APP_ORIGINS` is a comma-separated allowlist for the web application. AWS
-credentials should be supplied through the standard AWS credential chain
-(prefer an IAM role in deployed environments); do not put credentials in the
-repository or `.env.example`. Configure `S3_BUCKET` as a private bucket with
+`APP_ORIGINS` is a comma-separated allowlist for the web application. SMTP
+credentials belong only in the private environment and must not be committed.
+Configure `S3_BUCKET` as a private bucket with
 block-public-access enabled and a CORS policy allowing the web app to `PUT`
-objects with the signed `Content-Type` header. Set `EMAIL_FROM_ADDRESS` to an
-SES-verified sender before enabling queued email delivery.
+objects with the signed `Content-Type` header. The SMTP sender address must be
+authorized by your email provider.
 
 When connecting to Supabase from an IPv4-only network, use the project's
 session pooler connection details rather than its direct database host. Set

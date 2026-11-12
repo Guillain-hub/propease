@@ -1,5 +1,14 @@
 import { OrganisationType } from '@prisma/client';
-import { IsEmail, IsEnum, IsString, MaxLength, MinLength } from 'class-validator';
+import {
+  IsEmail,
+  IsEnum,
+  IsOptional,
+  IsString,
+  MaxLength,
+  MinLength,
+  Matches,
+  ValidateIf,
+} from 'class-validator';
 
 export class RegisterDto {
   @IsString()
@@ -16,11 +25,18 @@ export class RegisterDto {
   @MaxLength(128)
   password!: string;
 
+  @IsOptional()
+  @IsString()
+  @Matches(/^[a-f0-9]{64}$/i)
+  invitationToken?: string;
+
+  @ValidateIf((input: RegisterDto) => !input.invitationToken)
   @IsString()
   @MinLength(2)
   @MaxLength(180)
-  organisationName!: string;
+  organisationName?: string;
 
+  @ValidateIf((input: RegisterDto) => !input.invitationToken)
   @IsEnum(OrganisationType)
-  organisationType!: OrganisationType;
+  organisationType?: OrganisationType;
 }

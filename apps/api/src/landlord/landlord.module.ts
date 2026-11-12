@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../auth/auth.module.js';
+import { EmailModule } from '../email/email.module.js';
 import { OrganisationsModule } from '../organisations/organisations.module.js';
 import { DocumentsModule } from '../documents/documents.module.js';
 import {
@@ -13,6 +14,7 @@ import { LandlordSubscriptionModule } from './landlord-subscription.module.js';
 @Module({
   imports: [
     AuthModule,
+    EmailModule,
     OrganisationsModule,
     DocumentsModule,
     LandlordSubscriptionModule,

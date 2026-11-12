@@ -104,9 +104,10 @@ export class LandlordPermissionsGuard implements CanActivate {
         landlordPath.startsWith('/team') ||
         landlordPath.startsWith('/subscription') ||
         landlordPath.startsWith('/settings') ||
-        landlordPath.startsWith('/property-owners')
+        landlordPath.startsWith('/property-owners') ||
+        landlordPath.startsWith('/expenses')
       ) {
-        throw new ForbiddenException('Property managers cannot manage organisation access, billing, or owners');
+        throw new ForbiddenException('Property managers cannot manage organisation access, billing, owners, or expenses');
       }
       if (method === 'POST' && landlordPath === '/properties') {
         throw new ForbiddenException('Only owners and administrators can create properties');

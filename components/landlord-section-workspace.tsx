@@ -11,9 +11,12 @@ import {
   FileText,
   KeyRound,
   LoaderCircle,
+  Pencil,
   Plus,
   Receipt,
   RefreshCw,
+  Search,
+  Trash2,
   Upload,
   Users,
   X,
@@ -41,8 +44,9 @@ type Choice = { value: string; label: string };
 type Field = {
   name: string;
   label: string;
-  type?: "date" | "datetime-local" | "number" | "email" | "textarea" | "multi";
+  type?: "date" | "datetime-local" | "number" | "email" | "textarea" | "multi" | "image";
   required?: boolean;
+  disabled?: boolean;
   options?: Choice[];
   placeholder?: string;
 };
@@ -115,6 +119,30 @@ function rowsFor(data: ValueRecord, key: string, collection?: string): ValueReco
   return Array.isArray(value) ? value.map(record) : [];
 }
 
+function recordSearchValues(value: unknown, key = ""): string[] {
+  if (/(^id$|Id$)/i.test(key)) return [];
+  if (typeof value === "string" || typeof value === "number") {
+    return [String(value)];
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => recordSearchValues(item));
+  }
+  if (value !== null && typeof value === "object") {
+    return Object.entries(value).flatMap(([childKey, childValue]) =>
+      recordSearchValues(childValue, childKey),
+    );
+  }
+  return [];
+}
+
+function relatedProperty(row: ValueRecord): ValueRecord {
+  return record(
+    nested(row, "property") ??
+      nested(row, "unit", "property") ??
+      nested(row, "tenancy", "unit", "property"),
+  );
+}
+
 function formatAmount(value: unknown, currency: string): string {
   const amount = Number(value ?? 0);
   return `${Number.isFinite(amount) ? new Intl.NumberFormat("en").format(amount) : "0"} ${currency}`;
@@ -165,6 +193,36 @@ function selectOptions(rows: ValueRecord[], label: (row: ValueRecord) => string)
   );
 }
 
+function tenantOccupancy(row: ValueRecord): {
+  status: "current" | "upcoming" | "unassigned";
+  label: string;
+  propertyId: string;
+} {
+  const tenancies = rowsFor(row, "tenancies");
+  const current = tenancies.find((tenancy) => tenancy.status === "ACTIVE");
+  const upcoming = tenancies.find((tenancy) => tenancy.status === "UPCOMING");
+  const tenancy = current ?? upcoming;
+  const propertyName = stringValue(nested(tenancy, "unit", "property", "name"), "");
+  const unitNumber = stringValue(nested(tenancy, "unit", "unitNumber"), "");
+  const propertyId = stringValue(nested(tenancy, "unit", "property", "id"), "");
+
+  if (current) {
+    return {
+      status: "current",
+      label: `${propertyName} · ${unitNumber}`,
+      propertyId,
+    };
+  }
+  if (upcoming) {
+    return {
+      status: "upcoming",
+      label: `Not yet · ${propertyName} · ${unitNumber}`,
+      propertyId,
+    };
+  }
+  return { status: "unassigned", label: "Not yet assigned", propertyId: "" };
+}
+
 function uploadFileField(label: string): Field {
   return { name: "file", label };
 }
@@ -174,26 +232,36 @@ export function LandlordSectionWorkspace({
   organisationId,
   currency,
   role,
+  userId,
   onUpdated,
 }: {
   section: SectionName;
   organisationId: string;
   currency: string;
   role: string;
+  userId: string;
   onUpdated: () => void;
 }) {
   const [data, setData] = useState<ValueRecord>({});
   const [form, setForm] = useState<Record<string, string>>({});
   const [editingId, setEditingId] = useState<string | null>(null);
   const [formOpen, setFormOpen] = useState(false);
+  const [teamMemberToRemove, setTeamMemberToRemove] = useState<ValueRecord | null>(null);
+  const [recordToArchive, setRecordToArchive] = useState<{
+    kind: "tenant" | "unit";
+    row: ValueRecord;
+  } | null>(null);
+  const [archivingRecord, setArchivingRecord] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [rentMode, setRentMode] = useState<"charges" | "payments" | "deposits">("charges");
   const [tenantMode, setTenantMode] = useState<"tenants" | "tenancies">("tenants");
   const [propertyView, setPropertyView] = useState<"properties" | "owners">("properties");
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [removingTeamMember, setRemovingTeamMember] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const formDialogRef = useRef<HTMLDivElement>(null);
   const addButtonRef = useRef<HTMLButtonElement>(null);
@@ -207,6 +275,7 @@ export function LandlordSectionWorkspace({
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
+    setLoadError(null);
     try {
       const endpoints: Record<SectionName, Array<[string, string, string?]>> = {
         Properties: [
@@ -217,7 +286,7 @@ export function LandlordSectionWorkspace({
         ],
         Units: [["units", "units", "units"], ["properties", "properties", "properties"]],
         Tenants: [["tenants", "tenants", "tenants"], ["tenancies", "tenancies", "tenancies"], ["units", "units", "units"]],
-        Leases: [["leases", "leases", "leases"], ["tenancies", "tenancies", "tenancies"]],
+        Leases: [["leases", "leases", "leases"], ["tenancies", "tenancies", "tenancies"], ["tenants", "tenants", "tenants"]],
         Inspections: [["inspections", "inspections", "inspections"], ["units", "units", "units"], ["tenancies", "tenancies", "tenancies"]],
         "Rent & Deposits": [["rent/charges", "charges", "charges"], ["rent/payments", "payments", "payments"], ["rent/deposits", "deposits", "deposits"], ["tenants", "tenants", "tenants"], ["tenancies", "tenancies", "tenancies"]],
         Expenses: [["expenses", "expenses", "expenses"], ["properties", "properties", "properties"]],
@@ -255,7 +324,7 @@ export function LandlordSectionWorkspace({
         });
       }
     } catch (requestError) {
-      setError(
+      setLoadError(
         requestError instanceof TypeError
           ? "Couldn't reach the PropEase API. Make sure it is running and try again."
           : requestError instanceof Error
@@ -270,6 +339,15 @@ export function LandlordSectionWorkspace({
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    if (!error && !success) return;
+    const timeout = window.setTimeout(() => {
+      setError(null);
+      setSuccess(null);
+    }, 5000);
+    return () => window.clearTimeout(timeout);
+  }, [error, success]);
 
   useEffect(() => {
     setEditingId(null);
@@ -317,6 +395,7 @@ export function LandlordSectionWorkspace({
 
   const properties = rowsFor(data, "properties");
   const units = rowsFor(data, "units");
+  const availableUnitCount = units.filter((unit) => unit.status === "AVAILABLE").length;
   const tenants = rowsFor(data, "tenants");
   const tenancies = rowsFor(data, "tenancies");
   const charges = rowsFor(data, "charges");
@@ -331,9 +410,28 @@ export function LandlordSectionWorkspace({
     const unitOptions = selectOptions(units, (row) =>
       `${stringValue(nested(row, "property", "name"))} · ${stringValue(row.unitNumber)}`,
     );
+    const availableUnitOptions = selectOptions(
+      units.filter((row) => row.status === "AVAILABLE"),
+      (row) =>
+        `${stringValue(nested(row, "property", "name"))} · ${stringValue(row.unitNumber)}`,
+    );
     const tenantOptions = selectOptions(tenants, (row) => stringValue(row.legalName));
+    const leaseTenancies = tenancies.filter(
+      (row) =>
+        (row.status === "ACTIVE" || row.status === "UPCOMING") &&
+        (!form.tenantId || nested(row, "tenant", "id") === form.tenantId),
+    );
     const tenancyOptions = selectOptions(tenancies, (row) =>
       `${stringValue(nested(row, "tenant", "legalName"))} · ${stringValue(nested(row, "unit", "property", "name"))} / ${stringValue(nested(row, "unit", "unitNumber"))}`,
+    );
+    const leaseTenancyOptions = selectOptions(leaseTenancies, (row) =>
+      `${stringValue(nested(row, "unit", "property", "name"))} / ${stringValue(nested(row, "unit", "unitNumber"))} · ${dateLabel(row.moveInDate)}`,
+    );
+    const inspectionTenancies = tenancies.filter(
+      (row) => !form.unitId || nested(row, "unit", "id") === form.unitId,
+    );
+    const inspectionTenancyOptions = selectOptions(inspectionTenancies, (row) =>
+      `${stringValue(nested(row, "tenant", "legalName"))} · ${stringValue(row.status).replaceAll("_", " ")} · ${dateLabel(row.moveInDate)}`,
     );
     const chargeOptions = selectOptions(
       charges.filter(
@@ -367,10 +465,12 @@ export function LandlordSectionWorkspace({
             ? [{ name: "propertyOwnerId", label: "Property owner", options: propertyOwnerOptions }]
             : []),
           { name: "description", label: "Description", type: "textarea" },
-          { name: "status", label: "Status", options: [
-            { value: "ACTIVE", label: "Active" },
-            { value: "ARCHIVED", label: "Archived" },
-          ] },
+          ...(editingId
+            ? [{ name: "status", label: "Status", options: [
+                { value: "ACTIVE", label: "Active" },
+                { value: "ARCHIVED", label: "Archived" },
+              ] }]
+            : []),
         ];
       case "Units":
         return [
@@ -393,7 +493,7 @@ export function LandlordSectionWorkspace({
         if (tenantMode === "tenancies") {
           return [
             { name: "tenantId", label: "Tenant", required: true, options: tenantOptions },
-            { name: "unitId", label: "Unit", required: true, options: unitOptions },
+            { name: "unitId", label: "Available unit", required: true, options: availableUnitOptions },
             { name: "moveInDate", label: "Move-in date", type: "date", required: true },
             { name: "moveOutDate", label: "Move-out date (optional)", type: "date" },
           ];
@@ -407,7 +507,14 @@ export function LandlordSectionWorkspace({
         ];
       case "Leases":
         return [
-          { name: "tenancyId", label: "Tenancy", required: true, options: tenancyOptions },
+          { name: "tenantId", label: "Tenant", required: true, options: tenantOptions },
+          {
+            name: "tenancyId",
+            label: "Tenancy and unit",
+            required: true,
+            disabled: !form.tenantId || leaseTenancyOptions.length === 0,
+            options: leaseTenancyOptions,
+          },
           { name: "startDate", label: "Start date", type: "date", required: true },
           { name: "endDate", label: "End date", type: "date", required: true },
           { name: "rentAmount", label: `Monthly rent (${currency})`, type: "number", required: true },
@@ -422,7 +529,12 @@ export function LandlordSectionWorkspace({
       case "Inspections":
         return [
           { name: "unitId", label: "Unit", required: true, options: unitOptions },
-          { name: "tenancyId", label: "Tenancy", options: tenancyOptions },
+          {
+            name: "tenancyId",
+            label: "Tenant / tenancy",
+            disabled: !form.unitId || inspectionTenancyOptions.length === 0,
+            options: inspectionTenancyOptions,
+          },
           { name: "type", label: "Inspection type", required: true, options: [
             { value: "MOVE_IN", label: "Move-in" },
             { value: "ROUTINE", label: "Routine" },
@@ -533,11 +645,13 @@ export function LandlordSectionWorkspace({
         ];
       case "Team":
         return [
-          { name: "email", label: "Collaborator email", type: "email", required: true },
+          ...(!editingId
+            ? [{ name: "email", label: "Collaborator email", type: "email" as const, required: true }]
+            : []),
           { name: "role", label: "Role", required: true, options: [
             ...(role === "OWNER" ? [{ value: "ADMIN", label: "Admin" }] : []),
             ...(role === "OWNER" || role === "ADMIN" ? [{ value: "MANAGER", label: "Manager" }] : []),
-            ...(role === "OWNER" ? [{ value: "ACCOUNTANT", label: "Accountant" }, { value: "MAINTENANCE_STAFF", label: "Maintenance staff" }] : []),
+            ...(role === "OWNER" || role === "ADMIN" ? [{ value: "ACCOUNTANT", label: "Accountant" }, { value: "MAINTENANCE_STAFF", label: "Maintenance staff" }] : []),
           ] },
           ...(form.role === "MANAGER"
             ? [{
@@ -555,7 +669,22 @@ export function LandlordSectionWorkspace({
   }, [section, properties, units, tenants, tenancies, charges, deposits, currency, rentMode, tenantMode, propertyView, data, form, role]);
 
   function updateField(name: string, value: string) {
-    setForm((current) => ({ ...current, [name]: value }));
+    if (section === "Inspections" && name === "unitId") {
+      const unitTenancies = tenancies.filter((tenancy) => nested(tenancy, "unit", "id") === value);
+      const currentTenancy = unitTenancies.find((tenancy) => tenancy.status === "ACTIVE")
+        ?? unitTenancies.find((tenancy) => tenancy.status === "UPCOMING");
+      setForm((current) => ({
+        ...current,
+        unitId: value,
+        tenancyId: currentTenancy ? stringValue(currentTenancy.id, "") : "",
+      }));
+      return;
+    }
+    setForm((current) => ({
+      ...current,
+      [name]: value,
+      ...(name === "tenantId" ? { tenancyId: "" } : {}),
+    }));
   }
 
   function openForm() {
@@ -592,7 +721,11 @@ export function LandlordSectionWorkspace({
   }
 
   function editRecord(row: ValueRecord) {
-    if (typeof row.id !== "string") return;
+    const recordId =
+      section === "Team" && typeof row.userId === "string"
+        ? row.userId
+        : row.id;
+    if (typeof recordId !== "string") return;
     const values: Record<string, unknown> = section === "Properties"
       ? propertyView === "owners"
         ? {
@@ -608,8 +741,16 @@ export function LandlordSectionWorkspace({
             ? { propertyOwnerId: nested(row, "propertyOwner", "id") }
             : {}),
           description: row.description,
+          photoFileId: row.photoFileId,
           status: row.status,
         }
+      : section === "Team"
+        ? {
+            role: row.role,
+            propertyIds: rowsFor(record(row.user), "propertyAssignments")
+              .map((assignment) => nested(assignment, "property", "id"))
+              .filter((id): id is string => typeof id === "string"),
+          }
       : section === "Units"
         ? {
             propertyId: nested(row, "property", "id"),
@@ -630,13 +771,27 @@ export function LandlordSectionWorkspace({
             emergencyContactName: row.emergencyContactName,
             emergencyContactPhone: row.emergencyContactPhone,
           };
-    setEditingId(row.id);
+    setEditingId(recordId);
     setForm(Object.fromEntries(
       Object.entries(values).map(([key, value]) => [
         key,
         value === null || value === undefined ? "" : String(value),
       ]),
     ));
+    setSelectedFile(null);
+    setError(null);
+    setSuccess(null);
+    setFormOpen(true);
+  }
+
+  function assignUnitToTenant(row: ValueRecord) {
+    if (typeof row.id !== "string") return;
+    setTenantMode("tenancies");
+    setEditingId(null);
+    setForm({
+      tenantId: row.id,
+      moveInDate: new Date().toISOString().slice(0, 10),
+    });
     setSelectedFile(null);
     setError(null);
     setSuccess(null);
@@ -696,9 +851,10 @@ export function LandlordSectionWorkspace({
             label = "Property owner saved";
           } else {
             path = "properties";
+            const { photoFileId: _photoFileId, ...propertyFields } = form;
             payload = canManagePropertyOwners
-              ? { ...form, propertyOwnerId: form.propertyOwnerId || null }
-              : { ...form };
+              ? { ...propertyFields, propertyOwnerId: form.propertyOwnerId || null }
+              : { ...propertyFields };
             label = "Property added";
           }
           break;
@@ -827,15 +983,24 @@ export function LandlordSectionWorkspace({
           label = "Notice saved as draft";
           break;
         case "Team":
-          path = "team";
-          payload = {
-            email: form.email,
-            role: form.role,
-            ...(form.role === "MANAGER"
-              ? { propertyIds: form.propertyIds.split(",").filter(Boolean) }
-              : {}),
-          };
-          label = "Invitation created. The collaborator must sign in and accept it.";
+          path = editingId ? `team/${editingId}` : "team";
+          payload = editingId
+            ? {
+                role: form.role,
+                ...(form.role === "MANAGER"
+                  ? { propertyIds: form.propertyIds.split(",").filter(Boolean) }
+                  : {}),
+              }
+            : {
+                email: form.email,
+                role: form.role,
+                ...(form.role === "MANAGER"
+                  ? { propertyIds: form.propertyIds.split(",").filter(Boolean) }
+                  : {}),
+              };
+          label = editingId
+            ? "Team member updated"
+            : "Invitation email sent. The collaborator can register or sign in to join.";
           break;
         case "Settings":
           path = "settings";
@@ -847,6 +1012,9 @@ export function LandlordSectionWorkspace({
       }
 
       if (editingId) {
+        if (section === "Team") {
+          label = "Team member updated";
+        } else {
         const collection = section === "Properties"
           ? propertyView === "owners" ? "property-owners" : "properties"
           : section === "Units"
@@ -854,12 +1022,15 @@ export function LandlordSectionWorkspace({
             : "tenants";
         path = `${collection}/${editingId}`;
         label = `${section === "Properties" ? propertyView === "owners" ? "Property owner" : "Property" : section === "Units" ? "Unit" : "Tenant"} updated`;
+        }
       }
+
       const result = await apiRequest<ValueRecord>(`${base}/${path}`, {
         method: editingId || section === "Settings" ? "PATCH" : "POST",
         body: JSON.stringify(payload),
       });
-      const resultKey = section === "Rent & Deposits" && rentMode === "charges" ? "charge"
+      const resultKey = section === "Team" ? "member"
+        : section === "Rent & Deposits" && rentMode === "charges" ? "charge"
         : section === "Rent & Deposits" && rentMode === "payments" ? "payment"
           : section === "Properties" ? propertyView === "owners" ? "owner" : "property"
             : section === "Units" ? "unit"
@@ -907,6 +1078,27 @@ export function LandlordSectionWorkspace({
       );
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function removeTeamMember(row: ValueRecord) {
+    const memberId =
+      typeof row.userId === "string" ? row.userId : row.id;
+    if (typeof memberId !== "string") return;
+    const name = stringValue(nested(row, "user", "name"), stringValue(nested(row, "user", "email"), "this team member"));
+    setRemovingTeamMember(true);
+    setError(null);
+    setSuccess(null);
+    try {
+      await apiRequest(`${base}/team/${memberId}`, { method: "DELETE" });
+      setSuccess(`${name} removed from the workspace`);
+      setTeamMemberToRemove(null);
+      setRefreshKey((key) => key + 1);
+      onUpdated();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "The team member could not be removed.");
+    } finally {
+      setRemovingTeamMember(false);
     }
   }
 
@@ -1048,6 +1240,32 @@ export function LandlordSectionWorkspace({
     }
   }
 
+  async function archiveRecord() {
+    if (!recordToArchive || typeof recordToArchive.row.id !== "string") return;
+    setArchivingRecord(true);
+    setError(null);
+    try {
+      await apiRequest(
+        `${base}/${recordToArchive.kind === "tenant" ? "tenants" : "units"}/${recordToArchive.row.id}/archive`,
+        { method: "PATCH" },
+      );
+      setSuccess(
+        `${recordToArchive.kind === "tenant" ? "Tenant" : "Unit"} archived. Historical records have been retained.`,
+      );
+      setRecordToArchive(null);
+      setRefreshKey((key) => key + 1);
+      onUpdated();
+    } catch (requestError) {
+      setError(
+        requestError instanceof Error
+          ? requestError.message
+          : `The ${recordToArchive.kind} could not be archived.`,
+      );
+    } finally {
+      setArchivingRecord(false);
+    }
+  }
+
   async function applyReport() {
     const params = new URLSearchParams();
     if (form.from) params.set("from", form.from);
@@ -1112,15 +1330,22 @@ export function LandlordSectionWorkspace({
     "ACCOUNTANT",
   ].includes(role);
   const canManagePropertyOwners = ["OWNER", "ADMIN"].includes(role);
+  const canCreateProperties = ["OWNER", "ADMIN"].includes(role);
   const canManageCurrentRecords =
-    section === "Properties" && propertyView === "owners"
+    section === "Team"
+      ? ["OWNER", "ADMIN"].includes(role)
+      : section === "Properties" && propertyView === "owners"
       ? canManagePropertyOwners
       : section === "Rent & Deposits" || section === "Expenses" || section === "Utilities"
         ? canManageFinancialRecords
         : canManageRecords;
+  const canCreateCurrentRecord =
+    canManageCurrentRecords &&
+    (section !== "Properties" ||
+      propertyView !== "properties" ||
+      canCreateProperties);
   const canUpdateMaintenance =
     canManageRecords || role === "MAINTENANCE_STAFF";
-  const formDisabled = saving || !canManageCurrentRecords;
   const sectionItemName = section === "Properties" && propertyView === "owners"
     ? "property owner"
     : section.toLowerCase().replace(/ies$/, "y").replace(/s$/, "");
@@ -1146,22 +1371,6 @@ export function LandlordSectionWorkspace({
                     : section === "Notices" ? "Create notice" : `Add ${sectionItemName}`;
   const formTitle = editingId ? `Edit ${sectionItemName}` : formActionLabel;
   const FormIcon = sectionIcons[section];
-  const subtitle: Record<SectionName, string> = {
-    Properties: "Add and maintain the buildings in your organisation.",
-    Units: "Manage rental units, rent amounts, availability, and utilities.",
-    Tenants: "Keep tenant contact details and historical tenancy links together.",
-    Leases: "Track lease dates and attach signed agreement versions.",
-    Inspections: "Record checklist results and attach photo evidence.",
-    "Rent & Deposits": "Record charges, manually entered payments, allocations, and deposits separately.",
-    Expenses: "Record operating costs. Posted expenses are reversed, never deleted.",
-    Utilities: "Record utility bills and allocate the full bill precisely across units.",
-    Maintenance: "Track work requests, assignees, costs, and resolution.",
-    Notices: "Prepare draft notices. PropEase does not send or validate legal notices.",
-    Reports: "Review totals reconciled from rent charges, allocations, payments, and expenses.",
-    Team: "Invite existing PropEase accounts and manage organisation access.",
-    Subscription: "Review your trial, unit limits, invoices, and proposed plans.",
-    Settings: "Update organisation details and review the audit trail.",
-  };
 
   return (
     <div className="landlord-section">
@@ -1169,7 +1378,6 @@ export function LandlordSectionWorkspace({
         <div>
           <span className="dashboard-date">PROPEASE WORKSPACE</span>
           <h1>{title}</h1>
-          <p>{subtitle[section]}</p>
         </div>
         <button
           className="dashboard-secondary-button"
@@ -1181,8 +1389,27 @@ export function LandlordSectionWorkspace({
         </button>
       </div>
 
-      {error && !formOpen && <div className="landlord-alert is-error" role="alert">{error}</div>}
-      {success && <div className="landlord-alert is-success" role="status"><Check size={16} />{success}</div>}
+      {loadError && <div className="landlord-alert is-error" role="alert">{loadError}</div>}
+      {(error || success) && (
+        <div
+          className={`landlord-alert landlord-feedback-toast ${error ? "is-error" : "is-success"}`}
+          role={error ? "alert" : "status"}
+        >
+          {success && <Check size={16} aria-hidden="true" />}
+          <span>{error ?? success}</span>
+          <button
+            type="button"
+            className="landlord-feedback-dismiss"
+            aria-label="Dismiss notification"
+            onClick={() => {
+              setError(null);
+              setSuccess(null);
+            }}
+          >
+            <X size={16} aria-hidden="true" />
+          </button>
+        </div>
+      )}
 
       {section === "Properties" && canManagePropertyOwners && (
         <div className="landlord-tabs" role="tablist" aria-label="Property records">
@@ -1238,7 +1465,9 @@ export function LandlordSectionWorkspace({
         </div>
       )}
 
-      {section === "Reports" ? (
+      {loading ? (
+        <WorkspaceContentSkeleton section={section} />
+      ) : section === "Reports" ? (
         <ReportView
           report={record(data.report)}
           currency={currency}
@@ -1267,7 +1496,7 @@ export function LandlordSectionWorkspace({
             { name: "name", label: "Organisation name", required: true },
             { name: "country", label: "Country code (ISO 3166-1 alpha-2)", required: true },
             { name: "currency", label: "Currency code (ISO 4217)", required: true },
-          ]} values={form} onChange={updateField} onSubmit={submit} disabled={formDisabled} saving={saving} submitLabel="Save settings" />
+          ]} values={form} onChange={updateField} onSubmit={submit} canEdit={canManageCurrentRecords} saving={saving} submitLabel="Save settings" organisationId={organisationId} />
           <div className="landlord-panel-heading landlord-subheading"><div><h2>Recent audit activity</h2><p>Recent access and data changes in this organisation.</p></div></div>
           <RecordList rows={rowsFor(record(data.settings), "auditLogs")} currency={currency} section={section} />
         </section>
@@ -1277,11 +1506,10 @@ export function LandlordSectionWorkspace({
             <div className="landlord-panel-heading">
               <div>
                 <h2>{section === "Rent & Deposits" ? rentMode === "charges" ? "Rent charges" : rentMode === "payments" ? "Recorded payments" : "Deposit ledgers" : section === "Tenants" && tenantMode === "tenancies" ? "Tenancies" : section}</h2>
-                <p>{loading ? "Loading records..." : "Review and manage your latest records."}</p>
               </div>
               <div className="landlord-records-heading-actions">
                 {loading && <LoaderCircle className="landlord-spinner" size={17} />}
-                {canManageCurrentRecords && (
+                {canCreateCurrentRecord && (
                   <button
                     className="dashboard-primary-button landlord-add-record-button"
                     ref={addButtonRef}
@@ -1342,15 +1570,42 @@ export function LandlordSectionWorkspace({
             ) : section === "Inspections" ? (
               <RecordList rows={rowsFor(data, "inspections")} currency={currency} section={section} onDownload={(fileId) => void downloadFile(fileId)} />
             ) : section === "Team" ? (
-              <RecordList rows={rowsFor(data, "members")} currency={currency} section={section} />
+              <RecordList
+                rows={rowsFor(data, "members")}
+                currency={currency}
+                section={section}
+                onEdit={(row) => editRecord(row)}
+                onRemove={setTeamMemberToRemove}
+                canEditTeamMember={(row) =>
+                  !row.expiresAt &&
+                  row.status !== "SUSPENDED" &&
+                  nested(row, "user", "id") !== userId &&
+                  row.role !== "OWNER" &&
+                  (role === "OWNER" || (role === "ADMIN" && row.role !== "ADMIN"))
+                }
+                canRemoveTeamMember={(row) =>
+                  row.status !== "SUSPENDED" &&
+                  nested(row, "user", "id") !== userId &&
+                  row.role !== "OWNER" &&
+                  (role === "OWNER" || (role === "ADMIN" && row.role !== "ADMIN"))
+                }
+              />
             ) : (
               <RecordList
                 rows={section === "Tenants" && tenantMode === "tenancies" ? rowsFor(data, "tenancies") : rowsFor(data, sectionDataKey(section, rentMode))}
                 currency={currency}
                 section={section}
+                className={section === "Units" ? "is-unit-directory" : undefined}
+                organisationId={organisationId}
                 onEdit={canManageRecords && (["Properties", "Units"].includes(section) || (section === "Tenants" && tenantMode === "tenants")) ? editRecord : undefined}
                 tenantMode={tenantMode}
                 onMoveOut={section === "Tenants" && tenantMode === "tenancies" ? (row) => void moveOut(row) : undefined}
+                onAssignUnit={section === "Tenants" && tenantMode === "tenants" && canCreateCurrentRecord ? assignUnitToTenant : undefined}
+                onArchive={role === "ADMIN" && section === "Units"
+                  ? (row) => setRecordToArchive({ kind: "unit", row })
+                  : role === "ADMIN" && section === "Tenants" && tenantMode === "tenants"
+                    ? (row) => setRecordToArchive({ kind: "tenant", row })
+                    : undefined}
               />
             )}
             {!loading && rowsFor(data, section === "Properties" && propertyView === "owners" ? "propertyOwners" : section === "Tenants" && tenantMode === "tenancies" ? "tenancies" : sectionDataKey(section, rentMode)).length === 0 && (
@@ -1390,20 +1645,26 @@ export function LandlordSectionWorkspace({
                     <X size={19} />
                   </button>
                 </div>
-                {error && <div className="landlord-alert is-error" role="alert">{error}</div>}
                 <Form
                   fields={fields}
                   values={form}
                   onChange={updateField}
                   onSubmit={submit}
-                  disabled={formDisabled}
+                  canEdit={canManageCurrentRecords}
                   saving={saving}
                   selectedFile={selectedFile}
+                  organisationId={organisationId}
                   onFile={setSelectedFile}
                   submitLabel={editingId ? "Save changes" : undefined}
                   onCancel={closeForm}
                   helperText={section === "Rent & Deposits" && rentMode === "payments"
                     ? "An allocation is optional; if omitted, the payment remains unapplied and the rent balance will not be reduced."
+                    : section === "Leases"
+                      ? "Choose a tenant first, then select one of their active or upcoming tenancies. Tenants without a current or scheduled unit assignment cannot have a lease created yet."
+                    : section === "Tenants" && tenantMode === "tenancies"
+                      ? availableUnitCount > 0
+                        ? "Only units marked available are suggested."
+                        : "There are no units currently marked available. Update a unit's availability before assigning it."
                     : section === "Utilities"
                       ? "The total is split equally across selected units using whole cents; any remainder cents are assigned one by one."
                       : undefined}
@@ -1417,6 +1678,42 @@ export function LandlordSectionWorkspace({
               request={textRequest}
               onCancel={() => resolveTextRequest(null)}
               onSubmit={resolveTextRequest}
+            />
+          )}
+          {teamMemberToRemove && (
+            <ConfirmActionDialog
+              title="Remove team member?"
+              description={`${stringValue(nested(teamMemberToRemove, "user", "name"), stringValue(nested(teamMemberToRemove, "user", "email"), "This team member"))} will lose access to this workspace. Their historical records will be kept.`}
+              confirmLabel="Remove member"
+              busy={removingTeamMember}
+              error={error}
+              onCancel={() => {
+                if (!removingTeamMember) {
+                  setTeamMemberToRemove(null);
+                  setError(null);
+                }
+              }}
+              onConfirm={() => void removeTeamMember(teamMemberToRemove)}
+            />
+          )}
+          {recordToArchive && (
+            <ConfirmActionDialog
+              title={`Archive ${recordToArchive.kind}?`}
+              description={
+                recordToArchive.kind === "tenant"
+                  ? "This tenant will be removed from the active tenant list. Their tenancy, rent, payment, and maintenance history will be retained. Tenants with a current or scheduled tenancy cannot be archived."
+                  : "This unit will be marked archived and removed from available-unit suggestions. Its tenancy and maintenance history will be retained. Units with a current or scheduled tenancy cannot be archived."
+              }
+              confirmLabel={archivingRecord ? "Archiving…" : `Archive ${recordToArchive.kind}`}
+              busy={archivingRecord}
+              error={error}
+              onCancel={() => {
+                if (!archivingRecord) {
+                  setRecordToArchive(null);
+                  setError(null);
+                }
+              }}
+              onConfirm={() => void archiveRecord()}
             />
           )}
         </div>
@@ -1440,6 +1737,120 @@ export function LandlordSectionWorkspace({
       setError(requestError instanceof Error ? requestError.message : "The receipt could not be downloaded.");
     }
   }
+}
+
+function ConfirmActionDialog({
+  title,
+  description,
+  confirmLabel,
+  busy,
+  error,
+  onCancel,
+  onConfirm,
+}: {
+  title: string;
+  description: string;
+  confirmLabel: string;
+  busy: boolean;
+  error: string | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const dialogRef = useRef<HTMLElement>(null);
+  const cancelButtonRef = useRef<HTMLButtonElement>(null);
+  const confirmButtonRef = useRef<HTMLButtonElement>(null);
+  const onCancelRef = useRef(onCancel);
+  const busyRef = useRef(busy);
+  onCancelRef.current = onCancel;
+  busyRef.current = busy;
+
+  useEffect(() => {
+    const previousActiveElement = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    cancelButtonRef.current?.focus();
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape" && !busyRef.current) {
+        event.preventDefault();
+        onCancelRef.current();
+      } else if (event.key === "Tab") {
+        const focusable = [cancelButtonRef.current, confirmButtonRef.current]
+          .filter((element): element is HTMLButtonElement => element !== null && !element.disabled);
+        if (focusable.length === 0) {
+          event.preventDefault();
+          dialogRef.current?.focus();
+          return;
+        }
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      previousActiveElement?.focus();
+    };
+  }, []);
+  useEffect(() => {
+    if (busy) dialogRef.current?.focus();
+    else cancelButtonRef.current?.focus();
+  }, [busy]);
+
+  return (
+    <div
+      className="landlord-form-modal-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !busy) onCancel();
+      }}
+    >
+      <section
+        className="landlord-form-modal landlord-confirm-action-modal"
+        ref={dialogRef}
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby="confirm-action-title"
+        aria-describedby="confirm-action-description"
+        tabIndex={-1}
+      >
+        <div className="landlord-form-modal-header">
+          <span className="landlord-form-modal-icon" aria-hidden="true"><Users size={20} /></span>
+          <div>
+            <span className="dashboard-date">PROPEASE WORKSPACE</span>
+            <h2 id="confirm-action-title">{title}</h2>
+            <p id="confirm-action-description">{description}</p>
+          </div>
+        </div>
+        {error && <div className="landlord-alert is-error" role="alert">{error}</div>}
+        <div className="landlord-form-actions">
+          <button
+            className="landlord-form-cancel-button"
+            type="button"
+            ref={cancelButtonRef}
+            disabled={busy}
+            onClick={onCancel}
+          >
+            Cancel
+          </button>
+          <button
+            className="dashboard-primary-button landlord-confirm-danger-button"
+            type="button"
+            ref={confirmButtonRef}
+            disabled={busy}
+            onClick={onConfirm}
+          >
+            {busy ? "Removing…" : confirmLabel}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
 }
 
 function TextEntryDialog({
@@ -1569,9 +1980,26 @@ function PropertyOwnerList({
   rows: ValueRecord[];
   onEdit?: (row: ValueRecord) => void;
 }) {
+  const [search, setSearch] = useState("");
   if (!rows.length) return null;
+  const visibleRows = rows.filter((owner) =>
+    [owner.name, owner.email, owner.phone]
+      .some((value) => stringValue(value, "").toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())),
+  );
   return (
     <div className="landlord-record-table-wrap">
+      <div className="landlord-directory-controls">
+        <label className="landlord-directory-search">
+          <Search size={16} aria-hidden="true" />
+          <span className="visually-hidden">Search property owners</span>
+          <input
+            type="search"
+            placeholder="Search owner name or contact…"
+            value={search}
+            onChange={(event) => setSearch(event.currentTarget.value)}
+          />
+        </label>
+      </div>
       <table className="landlord-record-table">
         <thead>
           <tr>
@@ -1582,7 +2010,9 @@ function PropertyOwnerList({
           </tr>
         </thead>
         <tbody>
-          {rows.map((owner) => (
+          {visibleRows.length === 0 ? (
+            <tr><td colSpan={onEdit ? 4 : 3}>No owners match your search.</td></tr>
+          ) : visibleRows.map((owner) => (
             <tr key={stringValue(owner.id)}>
               <td><div className="landlord-record-main"><b>{stringValue(owner.name)}</b></div></td>
               <td><div className="landlord-record-details">
@@ -1621,10 +2051,11 @@ function Form({
   values,
   onChange,
   onSubmit,
-  disabled,
+  canEdit,
   saving,
   submitLabel,
   selectedFile,
+  organisationId,
   onFile,
   onCancel,
   helperText,
@@ -1633,18 +2064,61 @@ function Form({
   values: Record<string, string>;
   onChange: (name: string, value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
-  disabled: boolean;
+  canEdit: boolean;
   saving: boolean;
   submitLabel?: string;
   selectedFile?: File | null;
+  organisationId: string;
   onFile?: (file: File | null) => void;
   onCancel?: () => void;
   helperText?: string;
 }) {
+  const disabled = saving || !canEdit;
+  const photoInputRef = useRef<HTMLInputElement>(null);
   return (
     <form className="landlord-form" onSubmit={onSubmit}>
       <div className="landlord-form-fields">
-        {fields.map((field) => field.name === "file" ? (
+        {fields.map((field) => field.type === "image" ? (
+          <label className="landlord-field landlord-photo-field" key={field.name}>
+            <span>{field.label}</span>
+            <div className="landlord-photo-preview">
+              {selectedFile ? (
+                <SelectedPhoto file={selectedFile} />
+              ) : values[field.name] ? (
+                <OrganisationFileImage
+                  organisationId={organisationId}
+                  fileId={values[field.name]}
+                  alt="Current property photo"
+                  className="landlord-photo-image"
+                />
+              ) : (
+                <span className="landlord-photo-placeholder"><Building2 size={26} /><small>Property photo preview</small></span>
+              )}
+            </div>
+            <input
+              accept="image/jpeg,image/png,image/webp"
+              disabled={disabled}
+              ref={photoInputRef}
+              onChange={(event) => onFile?.(event.currentTarget.files?.[0] ?? null)}
+              type="file"
+            />
+            <small>JPG, PNG, or WebP · up to 20 MB</small>
+            {(selectedFile || values[field.name]) && (
+              <button
+                className="landlord-text-action"
+                type="button"
+                disabled={disabled}
+                onClick={() => {
+                  onFile?.(null);
+                  onChange(field.name, "");
+                  if (photoInputRef.current) photoInputRef.current.value = "";
+                }}
+              >
+                Remove photo
+              </button>
+            )}
+          </label>
+        ) : field.name === "file" ? (
           <label className="landlord-field" key={field.name}>
             <span>{field.label}</span>
             <input
@@ -1661,7 +2135,7 @@ function Form({
             {field.options ? (
               field.type === "multi" ? (
                 <select
-                  disabled={disabled}
+                  disabled={disabled || field.disabled}
                       required={field.required}
                       multiple
                   onChange={(event) => onChange(field.name, Array.from(event.currentTarget.selectedOptions, (option) => option.value).join(","))}
@@ -1671,7 +2145,7 @@ function Form({
                 </select>
               ) : (
                 <select
-                  disabled={disabled}
+                  disabled={disabled || field.disabled}
                   onChange={(event) => onChange(field.name, event.currentTarget.value)}
                   required={field.required}
                   value={values[field.name] ?? ""}
@@ -1704,7 +2178,7 @@ function Form({
           </label>
         ))}
       </div>
-      {disabled && <p className="landlord-help-text">Your role can view this section but cannot make changes.</p>}
+      {!canEdit && <p className="landlord-help-text">Your role can view this section but cannot make changes.</p>}
       {helperText && <p className="landlord-form-helper">{helperText}</p>}
       <div className="landlord-form-actions">
         <button className="dashboard-primary-button" disabled={disabled || saving} type="submit">
@@ -1721,30 +2195,147 @@ function Form({
   );
 }
 
+function SelectedPhoto({ file }: { file: File }) {
+  const [previewUrl, setPreviewUrl] = useState("");
+
+  useEffect(() => {
+    const url = URL.createObjectURL(file);
+    setPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
+
+  return previewUrl
+    ? <img className="landlord-photo-image" src={previewUrl} alt="Selected property photo preview" />
+    : <span className="landlord-photo-placeholder">Preparing photo preview…</span>;
+}
+
+function WorkspaceContentSkeleton({ section }: { section: SectionName }) {
+  const title = section === "Rent & Deposits" ? "Rent and deposit records" : section;
+  return (
+    <section
+      className="landlord-panel landlord-content-skeleton"
+      role="status"
+      aria-label={`Loading ${title.toLocaleLowerCase()}`}
+      aria-busy="true"
+    >
+      <span className="visually-hidden">Loading {title.toLocaleLowerCase()}…</span>
+      <div className="landlord-skeleton-heading" aria-hidden="true">
+        <span className="landlord-skeleton-block is-heading" />
+        <span className="landlord-skeleton-block is-description" />
+      </div>
+      <div className="landlord-skeleton-controls" aria-hidden="true">
+        <span className="landlord-skeleton-block" />
+        <span className="landlord-skeleton-block" />
+        <span className="landlord-skeleton-block" />
+      </div>
+      <div className="landlord-skeleton-table" aria-hidden="true">
+        <div className="landlord-skeleton-table-header">
+          {[0, 1, 2, 3].map((column) => (
+            <span className="landlord-skeleton-block" key={column} />
+          ))}
+        </div>
+        {[0, 1, 2, 3, 4].map((row) => (
+          <div className="landlord-skeleton-table-row" key={row}>
+            {[0, 1, 2, 3].map((column) => (
+              <span
+                className={`landlord-skeleton-block${column === 0 ? " is-primary" : ""}`}
+                key={column}
+              />
+            ))}
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function OrganisationFileImage({
+  organisationId,
+  fileId,
+  alt,
+  className,
+}: {
+  organisationId: string;
+  fileId: unknown;
+  alt: string;
+  className: string;
+}) {
+  const [imageUrl, setImageUrl] = useState("");
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    if (typeof fileId !== "string" || !fileId) {
+      setImageUrl("");
+      setFailed(false);
+      return;
+    }
+    let active = true;
+    setImageUrl("");
+    setFailed(false);
+    void apiRequest<{ downloadUrl: string }>(
+      `/organisations/${organisationId}/files/${fileId}/preview-url`,
+    ).then(
+      ({ downloadUrl }) => {
+        if (active) setImageUrl(downloadUrl);
+      },
+      () => {
+        if (active) setFailed(true);
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [fileId, organisationId]);
+
+  if (failed || !imageUrl) {
+    const message = failed
+      ? "Property photo unavailable"
+      : typeof fileId === "string" && fileId
+        ? "Loading property photo"
+        : "No property photo";
+    return <span className="landlord-photo-placeholder" role="img" aria-label={message}><Building2 size={22} /></span>;
+  }
+  return <img className={className} src={imageUrl} alt={alt} onError={() => setFailed(true)} />;
+}
+
 function RecordList({
   rows,
   currency,
   section,
+  className,
+  organisationId,
   rentMode,
   onReverse,
   onReceipt,
   onDownload,
   onEdit,
+  onRemove,
+  canEditTeamMember,
+  canRemoveTeamMember,
   onLeaseStatus,
   tenantMode,
   onMoveOut,
+  onAssignUnit,
+  onArchive,
 }: {
   rows: ValueRecord[];
   currency: string;
   section: SectionName;
+  className?: string;
+  organisationId?: string;
   rentMode?: "charges" | "payments" | "deposits";
   onReverse?: (path: string) => void;
   onReceipt?: (id: string) => void;
   onDownload?: (fileId: string) => void;
   onEdit?: (row: ValueRecord) => void;
+  onRemove?: (row: ValueRecord) => void;
+  canEditTeamMember?: (row: ValueRecord) => boolean;
+  canRemoveTeamMember?: (row: ValueRecord) => boolean;
   onLeaseStatus?: (row: ValueRecord, status: string) => void;
   tenantMode?: "tenants" | "tenancies";
   onMoveOut?: (row: ValueRecord) => void;
+  onAssignUnit?: (row: ValueRecord) => void;
+  onArchive?: (row: ValueRecord) => void;
 }) {
   const recordHeadings: Partial<Record<SectionName, string>> = {
     Leases: "Lease",
@@ -1778,29 +2369,429 @@ function RecordList({
   const showStatus = section === "Properties"
     || section === "Units"
     || (section === "Tenants" && tenantMode === "tenancies")
+    || section === "Team"
     || section === "Leases"
     || section === "Notices"
     || section === "Rent & Deposits"
     || section === "Expenses"
     || section === "Utilities";
-  const showActions = Boolean(onEdit || onReverse || onReceipt || onLeaseStatus || onMoveOut || onDownload);
+  const showOccupancy = section === "Tenants" && tenantMode === "tenants";
+  const showTenancyLocation = section === "Tenants" && tenantMode === "tenancies";
+  const showActions = Boolean(onEdit || onRemove || onReverse || onReceipt || onLeaseStatus || onMoveOut || onAssignUnit || onArchive || onDownload);
+  const isPropertyDirectory = section === "Properties";
+  const isTenantDirectory = showOccupancy;
+  const isTenancyDirectory = showTenancyLocation;
+  const isUnitDirectory = section === "Units";
+  const isLeaseDirectory = section === "Leases";
+  const isSearchableDirectory = section !== "Settings";
+  const [recordSearch, setRecordSearch] = useState("");
+  const [recordStatusFilter, setRecordStatusFilter] = useState("all");
+  const [recordPropertyFilter, setRecordPropertyFilter] = useState("all");
+  const [sortState, setSortState] = useState<{
+    key: "name" | "details" | "location" | "status" | "dates";
+    direction: "asc" | "desc";
+  }>({ key: "name", direction: "asc" });
+
+  useEffect(() => {
+    setRecordSearch("");
+    setRecordStatusFilter("all");
+    setRecordPropertyFilter("all");
+    setSortState({ key: "name", direction: "asc" });
+  }, [section, tenantMode]);
+
+  const directoryProperties = useMemo(() => {
+    const options = new Map<string, string>();
+    for (const row of rows) {
+      if (isTenantDirectory) {
+        const occupancy = tenantOccupancy(row);
+        if (occupancy.propertyId) {
+          options.set(
+            occupancy.propertyId,
+            stringValue(nested(
+              rowsFor(row, "tenancies").find((tenancy) =>
+                nested(tenancy, "unit", "property", "id") === occupancy.propertyId,
+              ),
+              "unit",
+              "property",
+              "name",
+            )),
+          );
+        }
+      } else if (isUnitDirectory) {
+        const propertyId = stringValue(nested(row, "property", "id"), "");
+        if (propertyId) {
+          options.set(propertyId, stringValue(nested(row, "property", "name")));
+        }
+      } else if (isTenancyDirectory) {
+        const propertyId = stringValue(nested(row, "unit", "property", "id"), "");
+        if (propertyId) {
+          options.set(
+            propertyId,
+            stringValue(nested(row, "unit", "property", "name")),
+          );
+        }
+      } else {
+        const property = relatedProperty(row);
+        const propertyId = stringValue(property.id, "");
+        if (propertyId) {
+          options.set(propertyId, stringValue(property.name));
+        }
+      }
+    }
+    return [...options.entries()]
+      .map(([value, label]) => ({ value, label }))
+      .sort((left, right) => left.label.localeCompare(right.label));
+  }, [isTenantDirectory, isTenancyDirectory, isUnitDirectory, rows]);
+  const propertyTypes = useMemo(
+    () => [...new Set(rows.map((row) => stringValue(row.type, "")).filter(Boolean))]
+      .sort((left, right) => left.localeCompare(right)),
+    [rows],
+  );
+  const statusOptions = useMemo(
+    () => [...new Set(rows.map((row) =>
+      stringValue(
+        row.status ??
+          (row.reversedAt ? "REVERSED" : ["Expenses", "Utilities"].includes(section) ||
+            (section === "Rent & Deposits" && rentMode === "charges")
+            ? "POSTED"
+            : ""),
+        "",
+      ),
+    ).filter(Boolean))]
+      .sort((left, right) => left.localeCompare(right)),
+    [rentMode, rows, section],
+  );
+  const visibleRows = useMemo(() => {
+    const search = recordSearch.trim().toLocaleLowerCase();
+    return rows
+      .filter((row) => {
+        if (isPropertyDirectory) {
+          if (recordStatusFilter !== "all" && row.status !== recordStatusFilter) {
+            return false;
+          }
+          if (recordPropertyFilter !== "all" && row.type !== recordPropertyFilter) {
+            return false;
+          }
+          const searchable = [
+            row.name,
+            row.address,
+            row.type,
+            row.description,
+            nested(row, "propertyOwner", "name"),
+          ].map((value) => stringValue(value, "").toLocaleLowerCase());
+          return !search || searchable.some((value) => value.includes(search));
+        }
+        if (isTenantDirectory) {
+          const occupancy = tenantOccupancy(row);
+          if (recordStatusFilter !== "all" && occupancy.status !== recordStatusFilter) {
+            return false;
+          }
+          if (recordPropertyFilter !== "all" && occupancy.propertyId !== recordPropertyFilter) {
+            return false;
+          }
+          const searchable = [
+            row.legalName,
+            row.email,
+            row.phone,
+            occupancy.label,
+          ].map((value) => stringValue(value, "").toLocaleLowerCase());
+          return !search || searchable.some((value) => value.includes(search));
+        }
+        if (isUnitDirectory) {
+          if (recordStatusFilter !== "all" && row.status !== recordStatusFilter) {
+            return false;
+          }
+          if (
+            recordPropertyFilter !== "all" &&
+            nested(row, "property", "id") !== recordPropertyFilter
+          ) {
+            return false;
+          }
+          const searchable = [
+            row.unitNumber,
+            nested(row, "property", "name"),
+            nested(row, "tenancies", "0", "tenant", "legalName"),
+            row.floor,
+          ].map((value) => stringValue(value, "").toLocaleLowerCase());
+          return !search || searchable.some((value) => value.includes(search));
+        }
+        if (isTenancyDirectory) {
+          if (recordStatusFilter !== "all" && row.status !== recordStatusFilter) {
+            return false;
+          }
+          if (
+            recordPropertyFilter !== "all" &&
+            nested(row, "unit", "property", "id") !== recordPropertyFilter
+          ) {
+            return false;
+          }
+          const searchable = [
+            nested(row, "tenant", "legalName"),
+            nested(row, "unit", "property", "name"),
+            nested(row, "unit", "unitNumber"),
+            row.moveInDate,
+            row.moveOutDate,
+            dateLabel(row.moveInDate),
+            dateLabel(row.moveOutDate),
+            row.status,
+          ].map((value) => stringValue(value, "").toLocaleLowerCase());
+          return !search || searchable.some((value) => value.includes(search));
+        }
+        if (showStatus && recordStatusFilter !== "all") {
+          const status = stringValue(
+            row.status ??
+              (row.reversedAt ? "REVERSED" : ["Expenses", "Utilities"].includes(section) ||
+                (section === "Rent & Deposits" && rentMode === "charges")
+                ? "POSTED"
+                : ""),
+            "",
+          );
+          if (status !== recordStatusFilter) return false;
+        }
+        if (
+          recordPropertyFilter !== "all" &&
+          stringValue(relatedProperty(row).id, "") !== recordPropertyFilter
+        ) {
+          return false;
+        }
+        const searchable = recordSearchValues(row)
+          .map((value) => value.toLocaleLowerCase());
+        return !search || searchable.some((value) => value.includes(search));
+      })
+      .sort((left, right) => {
+        const direction = sortState.direction === "asc" ? 1 : -1;
+        const sortValue = (row: ValueRecord): string => {
+          if (isPropertyDirectory) {
+            if (sortState.key === "name") return stringValue(row.name, "");
+            if (sortState.key === "details") return stringValue(row.address, "");
+            if (sortState.key === "status") return stringValue(row.status, "");
+          }
+          if (isTenantDirectory) {
+            if (sortState.key === "name") return stringValue(row.legalName, "");
+            if (sortState.key === "details") return stringValue(row.email ?? row.phone, "");
+            if (sortState.key === "location") return tenantOccupancy(row).label;
+            return tenantOccupancy(row).status;
+          }
+          if (isUnitDirectory) {
+            if (sortState.key === "name") {
+              return `${stringValue(nested(row, "property", "name"), "")} ${stringValue(row.unitNumber, "")}`;
+            }
+            if (sortState.key === "details") {
+              return stringValue(nested(row, "tenancies", "0", "tenant", "legalName"), "");
+            }
+            if (sortState.key === "status") return stringValue(row.status, "");
+          }
+          if (isTenancyDirectory) {
+            if (sortState.key === "name") {
+              return stringValue(nested(row, "tenant", "legalName"), "");
+            }
+            if (sortState.key === "details" || sortState.key === "dates") {
+              return stringValue(row.moveInDate, "");
+            }
+            if (sortState.key === "location") {
+              return `${stringValue(nested(row, "unit", "property", "name"), "")} ${stringValue(nested(row, "unit", "unitNumber"), "")}`;
+            }
+            return stringValue(row.status, "");
+          }
+          if (isLeaseDirectory) {
+            if (sortState.key === "name") {
+              return stringValue(nested(row, "tenancy", "tenant", "legalName"), "");
+            }
+            if (sortState.key === "details" || sortState.key === "dates") {
+              return stringValue(row.startDate, "");
+            }
+            if (sortState.key === "status") return stringValue(row.status, "");
+          }
+          return "";
+        };
+        return sortValue(left).localeCompare(sortValue(right), undefined, {
+          numeric: true,
+          sensitivity: "base",
+        }) * direction;
+      });
+  }, [
+    isPropertyDirectory,
+    isTenantDirectory,
+    isTenancyDirectory,
+    isUnitDirectory,
+    isLeaseDirectory,
+    recordPropertyFilter,
+    recordSearch,
+    recordStatusFilter,
+    rentMode,
+    rows,
+    sortState,
+    showStatus,
+    section,
+  ]);
+
+  function sortBy(key: typeof sortState.key) {
+    setSortState((current) => ({
+      key,
+      direction: current.key === key && current.direction === "asc" ? "desc" : "asc",
+    }));
+  }
+
+  function sortableHeader(label: string, key: typeof sortState.key) {
+    const active = sortState.key === key;
+    return (
+      <th scope="col" aria-sort={active ? sortState.direction === "asc" ? "ascending" : "descending" : "none"}>
+        <button className="landlord-sort-button" type="button" onClick={() => sortBy(key)}>
+          {label}
+          <span aria-hidden="true">{active ? sortState.direction === "asc" ? " ↑" : " ↓" : " ↕"}</span>
+        </button>
+      </th>
+    );
+  }
+
   if (!rows.length) return null;
   return (
     <div className="landlord-record-table-wrap">
-      <table className={`landlord-record-table${showAmount ? " has-amount" : ""}${showStatus ? " has-status" : ""}${showActions ? " has-actions" : ""}`}>
+      {isSearchableDirectory && (
+        <div className="landlord-directory-controls">
+          <label className="landlord-directory-search">
+            <Search size={16} aria-hidden="true" />
+            <span className="visually-hidden">
+              Search {isPropertyDirectory
+                ? "properties"
+                : isTenantDirectory
+                  ? "tenants"
+                  : isTenancyDirectory
+                    ? "tenancies"
+                    : isUnitDirectory
+                      ? "units"
+                      : section === "Rent & Deposits"
+                        ? rentMode
+                        : section.toLocaleLowerCase()}
+            </span>
+            <input
+              type="search"
+              placeholder={
+                isPropertyDirectory
+                  ? "Search name, address, type, or owner…"
+                  : isTenantDirectory
+                  ? "Search tenants…"
+                  : isTenancyDirectory
+                    ? "Search tenant, property, unit, or date…"
+                      : isUnitDirectory
+                        ? "Search units…"
+                        : section === "Leases"
+                          ? "Search tenant, property, unit, or lease dates…"
+                          : "Search records…"
+              }
+              value={recordSearch}
+              onChange={(event) => setRecordSearch(event.currentTarget.value)}
+            />
+          </label>
+          {showStatus && (
+            <label className="landlord-directory-filter">
+              <span>{isTenantDirectory ? "Occupancy" : isTenancyDirectory ? "Tenancy status" : isUnitDirectory ? "Availability" : "Status"}</span>
+              <select
+                value={recordStatusFilter}
+                onChange={(event) => setRecordStatusFilter(event.currentTarget.value)}
+              >
+                <option value="all">
+                  {isTenantDirectory ? "All tenants" : isTenancyDirectory ? "All tenancies" : "All statuses"}
+                </option>
+                {isPropertyDirectory ? (
+                  <>
+                    <option value="ACTIVE">Active</option>
+                    <option value="INACTIVE">Inactive</option>
+                    <option value="ARCHIVED">Archived</option>
+                  </>
+                ) : isTenantDirectory ? (
+                  <>
+                    <option value="current">Current</option>
+                    <option value="upcoming">Upcoming</option>
+                    <option value="unassigned">Not assigned</option>
+                  </>
+                ) : isTenancyDirectory ? (
+                  <>
+                    <option value="UPCOMING">Upcoming</option>
+                    <option value="ACTIVE">Active</option>
+                    <option value="ENDED">Ended</option>
+                    <option value="TERMINATED">Terminated</option>
+                  </>
+                ) : isUnitDirectory ? (
+                  <>
+                    <option value="AVAILABLE">Available</option>
+                    <option value="OCCUPIED">Occupied</option>
+                    <option value="UNAVAILABLE">Unavailable</option>
+                    <option value="ARCHIVED">Archived</option>
+                  </>
+                ) : statusOptions.map((status) => (
+                  <option key={status} value={status}>{status.replaceAll("_", " ")}</option>
+                ))}
+              </select>
+            </label>
+          )}
+          {isPropertyDirectory ? (
+            <label className="landlord-directory-filter">
+              <span>Type</span>
+              <select
+                value={recordPropertyFilter}
+                onChange={(event) => setRecordPropertyFilter(event.currentTarget.value)}
+              >
+                <option value="all">All types</option>
+                {propertyTypes.map((type) => (
+                  <option key={type} value={type}>{type.replaceAll("_", " ")}</option>
+                ))}
+              </select>
+            </label>
+          ) : directoryProperties.length > 0 && (
+            <label className="landlord-directory-filter">
+              <span>Property</span>
+              <select
+                value={recordPropertyFilter}
+                onChange={(event) => setRecordPropertyFilter(event.currentTarget.value)}
+              >
+                <option value="all">All properties</option>
+                {directoryProperties.map((property) => (
+                  <option key={property.value} value={property.value}>{property.label}</option>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
+      )}
+      <table className={`landlord-record-table${section === "Team" ? " is-team-table" : ""}${showOccupancy ? " is-tenant-directory" : ""}${isTenancyDirectory ? " is-tenancy-directory" : ""}${className ? ` ${className}` : ""}${showAmount ? " has-amount" : ""}${showStatus ? " has-status" : ""}${showActions ? " has-actions" : ""}`}>
         <thead>
           <tr>
-            <th scope="col">{recordHeading}</th>
-            <th scope="col">Details</th>
+            {(isPropertyDirectory || isTenantDirectory || isTenancyDirectory || isUnitDirectory || isLeaseDirectory)
+              ? sortableHeader(recordHeading, "name")
+              : <th scope="col">{recordHeading}</th>}
+            {(isPropertyDirectory || isTenantDirectory || isUnitDirectory)
+              ? sortableHeader("Details", "details")
+              : isTenancyDirectory
+                ? sortableHeader("Dates", "dates")
+                : isLeaseDirectory
+                  ? sortableHeader("Dates", "dates")
+              : <th scope="col">Details</th>}
+            {showOccupancy && sortableHeader("Current unit", "location")}
+            {isTenancyDirectory && sortableHeader("Unit", "location")}
             {showAmount && <th scope="col">{amountHeading}</th>}
-            {showStatus && <th scope="col">Status</th>}
+            {showStatus && (isPropertyDirectory || isUnitDirectory || isTenancyDirectory || isLeaseDirectory
+              ? sortableHeader("Status", "status")
+              : <th scope="col">Status</th>)}
             {showActions && <th scope="col"><span className="visually-hidden">Actions</span></th>}
           </tr>
         </thead>
         <tbody>
-          {rows.map((row, index) => {
+          {visibleRows.length === 0 ? (
+            <tr>
+              <td colSpan={2 + (showOccupancy || isTenancyDirectory ? 1 : 0) + (showAmount ? 1 : 0) + (showStatus ? 1 : 0) + (showActions ? 1 : 0)}>
+                No records match your search and filters.
+              </td>
+            </tr>
+          ) : visibleRows.map((row, index) => {
         const id = typeof row.id === "string" ? row.id : `${section}-${index}`;
-        const status = stringValue(row.status ?? row.deliveryStatus ?? row.documentStatus, "");
+          const actionId =
+            section === "Team" && typeof row.userId === "string"
+              ? row.userId
+              : typeof row.id === "string"
+                ? row.id
+                : null;
+          const status = stringValue(row.status ?? row.deliveryStatus ?? row.documentStatus, "");
         const displayStatus = status || (
           section === "Expenses" || section === "Utilities"
             ? row.reversedAt ? "REVERSED" : "POSTED"
@@ -1814,6 +2805,7 @@ function RecordList({
         };
         let heading: string = section;
         let detail = "";
+        let occupancy = "Not yet assigned";
         let amountValue: unknown;
 
         if (section === "Properties") {
@@ -1831,12 +2823,13 @@ function RecordList({
           add("Rent", formatAmount(row.rentAmount, currency));
           amountValue = row.depositAmount;
         } else if (section === "Tenants" && tenantMode === "tenancies") {
-          heading = `${stringValue(nested(row, "tenant", "legalName"))} · ${stringValue(nested(row, "unit", "property", "name"))} / ${stringValue(nested(row, "unit", "unitNumber"))}`;
-          detail = `${stringValue(row.status)} · ${dateLabel(row.moveInDate)}${row.moveOutDate ? ` – ${dateLabel(row.moveOutDate)}` : ""}`;
+          heading = stringValue(nested(row, "tenant", "legalName"));
+          detail = `${dateLabel(row.moveInDate)}${row.moveOutDate ? ` – ${dateLabel(row.moveOutDate)}` : ""}`;
           add("Deposit held", formatAmount(nested(row, "deposit", "heldBalance"), currency));
         } else if (section === "Tenants") {
           heading = stringValue(row.legalName);
           detail = stringValue(row.email ?? row.phone, "No contact information");
+          occupancy = tenantOccupancy(row).label;
           add("Emergency contact", row.emergencyContactName);
           add("Phone", row.phone);
         } else if (section === "Leases") {
@@ -1904,13 +2897,23 @@ function RecordList({
         return (
           <tr key={id}>
             <td>
-              <div className="landlord-record-main">
+              <div className={`landlord-record-main${section === "Properties" ? " is-property-record" : ""}`}>
+                {section === "Properties" && organisationId && (
+                  <OrganisationFileImage
+                    organisationId={organisationId}
+                    fileId={row.photoFileId}
+                    alt={`${heading} property photo`}
+                    className="landlord-record-photo-image"
+                  />
+                )}
                 <b>{heading}</b>
-                {detail && <span>{detail}</span>}
+                {detail && !isTenancyDirectory && <span>{detail}</span>}
               </div>
             </td>
+            {showOccupancy && <td>{occupancy}</td>}
             <td>
               <div className="landlord-record-details">
+                {isTenancyDirectory && <small>{detail}</small>}
                 {lines.map(([label, value]) => <small key={label}>{label}: {value}</small>)}
                 {section === "Rent & Deposits" && rentMode === "payments" && Boolean(row.reversedAt) && (
                   <small className="landlord-reversal-note">Reversed: {stringValue(row.reversalReason)}</small>
@@ -1929,6 +2932,13 @@ function RecordList({
                 ))}
               </div>
             </td>
+            {isTenancyDirectory && (
+              <td>
+                {stringValue(nested(row, "unit", "property", "name"))}
+                {" · "}
+                {stringValue(nested(row, "unit", "unitNumber"))}
+              </td>
+            )}
             {showAmount && (
               <td className="landlord-record-amount">
                 {amountValue !== undefined ? formatAmount(amountValue, currency) : "—"}
@@ -1943,8 +2953,42 @@ function RecordList({
             )}
             {showActions && <td>
               <div className="landlord-record-actions">
+              {section === "Team" && actionId && canEditTeamMember?.(row) && onEdit && (
+                <button
+                  className="landlord-icon-button"
+                  type="button"
+                  aria-label={`Edit ${stringValue(nested(row, "user", "name"), "team member")}`}
+                  title="Edit team member"
+                  onClick={() => onEdit(row)}
+                >
+                  <Pencil size={15} />
+                </button>
+              )}
+              {section === "Team" && actionId && canRemoveTeamMember?.(row) && onRemove && (
+                <button
+                  className="landlord-icon-button landlord-team-remove-button"
+                  type="button"
+                  aria-label={`Remove ${stringValue(nested(row, "user", "name"), "team member")}`}
+                  title="Remove team member"
+                  onClick={() => onRemove(row)}
+                >
+                  <Trash2 size={15} />
+                </button>
+              )}
               {onEdit && typeof row.id === "string" && (
-                <button className="landlord-text-action" type="button" onClick={() => onEdit(row)}>Edit</button>
+                (section === "Tenants" && tenantMode === "tenants") || section === "Units" ? (
+                  <button
+                    className="landlord-icon-button"
+                    type="button"
+                    aria-label={`Edit ${section === "Units" ? stringValue(row.unitNumber, "unit") : stringValue(row.legalName, "tenant")}`}
+                    title={`Edit ${section === "Units" ? "unit" : "tenant"}`}
+                    onClick={() => onEdit(row)}
+                  >
+                    <Pencil size={15} />
+                  </button>
+                ) : section !== "Team" ? (
+                  <button className="landlord-text-action" type="button" onClick={() => onEdit(row)}>Edit</button>
+                ) : null
               )}
               {section === "Rent & Deposits" && rentMode === "payments" && !row.reversedAt && onReverse && (
                 <>
@@ -1966,6 +3010,32 @@ function RecordList({
               {section === "Tenants" && tenantMode === "tenancies" && onMoveOut && ["ACTIVE", "UPCOMING"].includes(status) && (
                 <button className="landlord-text-action" type="button" onClick={() => onMoveOut(row)}>Record move-out</button>
               )}
+              {section === "Tenants" && tenantMode === "tenants" && onAssignUnit &&
+                rowsFor(row, "tenancies").length === 0 && (
+                  <button
+                    className="landlord-icon-button"
+                    type="button"
+                    aria-label={`Find an available unit for ${stringValue(row.legalName, "tenant")}`}
+                    title="Find an available unit"
+                    onClick={() => onAssignUnit(row)}
+                  >
+                    <Search size={15} />
+                  </button>
+                )}
+              {onArchive && typeof row.id === "string" &&
+                ((section === "Units" && row.status !== "ARCHIVED") ||
+                  (section === "Tenants" && tenantMode === "tenants" &&
+                    rowsFor(row, "tenancies").length === 0)) && (
+                  <button
+                    className="landlord-icon-button landlord-team-remove-button"
+                    type="button"
+                    aria-label={`Archive ${section === "Units" ? stringValue(row.unitNumber, "unit") : stringValue(row.legalName, "tenant")}`}
+                    title={`Archive ${section === "Units" ? "unit" : "tenant"}`}
+                    onClick={() => onArchive(row)}
+                  >
+                    <Trash2 size={15} />
+                  </button>
+                )}
               {section === "Leases" && onLeaseStatus && ["DRAFT", "ACTIVE"].includes(status) && (
                 <select
                   aria-label="Update lease status"
@@ -2039,6 +3109,9 @@ function MaintenanceList({
   role: string;
 }) {
   const [invoiceFiles, setInvoiceFiles] = useState<Record<string, File>>({});
+  const [recordSearch, setRecordSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [propertyFilter, setPropertyFilter] = useState("all");
   const nextStatus: Record<string, string[]> = role === "MAINTENANCE_STAFF"
     ? { ASSIGNED: ["IN_PROGRESS"], IN_PROGRESS: ["COMPLETED"] }
     : {
@@ -2050,8 +3123,50 @@ function MaintenanceList({
     REJECTED: [],
     };
   if (!rows.length) return null;
+  const properties = [...new Map(rows.flatMap((row) => {
+    const property = relatedProperty(row);
+    const id = stringValue(property.id, "");
+    return id ? [[id, stringValue(property.name)] as const] : [];
+  })).entries()].sort((left, right) => left[1].localeCompare(right[1]));
+  const statuses = [...new Set(rows.map((row) => stringValue(row.status, "")))]
+    .filter(Boolean)
+    .sort((left, right) => left.localeCompare(right));
+  const search = recordSearch.trim().toLocaleLowerCase();
+  const visibleRows = rows.filter((row) => {
+    if (statusFilter !== "all" && row.status !== statusFilter) return false;
+    if (propertyFilter !== "all" && stringValue(relatedProperty(row).id, "") !== propertyFilter) return false;
+    return !search || recordSearchValues(row).some((value) => value.toLocaleLowerCase().includes(search));
+  });
   return (
     <div className="landlord-record-table-wrap">
+      <div className="landlord-directory-controls">
+        <label className="landlord-directory-search">
+          <Search size={16} aria-hidden="true" />
+          <span className="visually-hidden">Search maintenance requests</span>
+          <input
+            type="search"
+            placeholder="Search request, unit, tenant, or description…"
+            value={recordSearch}
+            onChange={(event) => setRecordSearch(event.currentTarget.value)}
+          />
+        </label>
+        <label className="landlord-directory-filter">
+          <span>Status</span>
+          <select value={statusFilter} onChange={(event) => setStatusFilter(event.currentTarget.value)}>
+            <option value="all">All statuses</option>
+            {statuses.map((status) => <option key={status} value={status}>{status.replaceAll("_", " ")}</option>)}
+          </select>
+        </label>
+        {properties.length > 0 && (
+          <label className="landlord-directory-filter">
+            <span>Property</span>
+            <select value={propertyFilter} onChange={(event) => setPropertyFilter(event.currentTarget.value)}>
+              <option value="all">All properties</option>
+              {properties.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
+            </select>
+          </label>
+        )}
+      </div>
       <table className="landlord-record-table landlord-maintenance-table">
         <thead>
           <tr>
@@ -2062,7 +3177,9 @@ function MaintenanceList({
           </tr>
         </thead>
         <tbody>
-          {rows.map((row, index) => {
+          {visibleRows.length === 0 ? (
+            <tr><td colSpan={4}>No requests match your search and filters.</td></tr>
+          ) : visibleRows.map((row, index) => {
         const status = stringValue(row.status);
         return (
           <tr key={stringValue(row.id, String(index))}>

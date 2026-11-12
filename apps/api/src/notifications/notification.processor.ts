@@ -1,9 +1,8 @@
 import { Processor, WorkerHost, OnWorkerEvent } from '@nestjs/bullmq';
-import { ConfigService } from '@nestjs/config';
 import { Injectable, Logger } from '@nestjs/common';
-import { SendEmailCommand, SESv2Client } from '@aws-sdk/client-sesv2';
 import type { Job } from 'bullmq';
 import { PrismaService } from '../database/prisma.service.js';
+import { EmailService } from '../email/email.service.js';
 import { notificationsQueue } from './notifications.constants.js';
 
 interface NotificationJob {
@@ -14,16 +13,12 @@ interface NotificationJob {
 @Processor(notificationsQueue)
 export class NotificationProcessor extends WorkerHost {
   private readonly logger = new Logger(NotificationProcessor.name);
-  private readonly ses: SESv2Client;
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly config: ConfigService,
+    private readonly email: EmailService,
   ) {
     super();
-    this.ses = new SESv2Client({
-      region: this.config.getOrThrow<string>('AWS_REGION'),
-    });
   }
 
   async process(job: Job<NotificationJob>): Promise<void> {
@@ -42,7 +37,9 @@ export class NotificationProcessor extends WorkerHost {
       return;
     }
     if (notification.channel !== 'EMAIL') {
-      throw new Error(`Unsupported notification channel: ${notification.channel}`);
+      throw new Error(
+        `Unsupported notification channel: ${notification.channel}`,
+      );
     }
 
     const payload = notification.payload;
@@ -55,20 +52,15 @@ export class NotificationProcessor extends WorkerHost {
       !('text' in payload) ||
       typeof payload.text !== 'string'
     ) {
-      throw new Error(`Notification ${notification.id} has an invalid email payload`);
+      throw new Error(
+        `Notification ${notification.id} has an invalid email payload`,
+      );
     }
 
-    await this.ses.send(
-      new SendEmailCommand({
-        FromEmailAddress: this.config.getOrThrow<string>('EMAIL_FROM_ADDRESS'),
-        Destination: { ToAddresses: [notification.user.email] },
-        Content: {
-          Simple: {
-            Subject: { Data: payload.subject, Charset: 'UTF-8' },
-            Body: { Text: { Data: payload.text, Charset: 'UTF-8' } },
-          },
-        },
-      }),
+    await this.email.send(
+      notification.user.email,
+      payload.subject,
+      payload.text,
     );
 
     await this.prisma.notification.update({
@@ -78,7 +70,10 @@ export class NotificationProcessor extends WorkerHost {
   }
 
   @OnWorkerEvent('failed')
-  async onFailed(job: Job<NotificationJob> | undefined, error: Error): Promise<void> {
+  async onFailed(
+    job: Job<NotificationJob> | undefined,
+    error: Error,
+  ): Promise<void> {
     if (!job || job.attemptsMade < (job.opts.attempts ?? 1)) {
       return;
     }

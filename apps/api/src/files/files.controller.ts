@@ -68,6 +68,22 @@ export class FilesController {
     );
   }
 
+  @Get(':fileId/preview-url')
+  createPreviewUrl(
+    @Param('organisationId', ParseUUIDPipe) organisationId: string,
+    @CurrentUser() user: AccessTokenClaims,
+    @Param('fileId', ParseUUIDPipe) fileId: string,
+    @Req() request: Request,
+  ) {
+    return this.storage.createDownloadUrl(
+      organisationId,
+      user.sub,
+      fileId,
+      request.organisationRole,
+      true,
+    );
+  }
+
   private assertCanUpload(role: MembershipRole | undefined): void {
     if (
       role !== MembershipRole.OWNER &&
