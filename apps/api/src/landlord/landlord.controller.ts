@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  Header,
   Param,
   ParseUUIDPipe,
   Patch,
@@ -12,7 +13,7 @@ import {
   StreamableFile,
   UseGuards,
 } from '@nestjs/common';
-import { MembershipRole } from '@prisma/client';
+import { MembershipRole, Prisma } from '@prisma/client';
 import type { Request } from 'express';
 import { CurrentUser } from '../auth/current-user.decorator.js';
 import { JwtAccessGuard } from '../auth/jwt-access.guard.js';
@@ -20,6 +21,8 @@ import type { AccessTokenClaims } from '../auth/auth.types.js';
 import { OrganisationAccessGuard } from '../organisations/organisation-access.guard.js';
 import { PdfService } from '../documents/pdf.service.js';
 import {
+  AssignTenantInput,
+  BatchUnitInput,
   ChargeInput,
   DepositTransactionInput,
   ExpenseInput,
@@ -50,7 +53,13 @@ import {
   UnitUpdateInput,
   UtilityInput,
 } from './dto/landlord.dto.js';
+import {
+  CreateTenantLeaseOnboardingInput,
+  ResendTenantLeaseOnboardingInput,
+  TenantLeaseReviewInput,
+} from './dto/tenant-lease-onboarding.dto.js';
 import { LandlordService } from './landlord.service.js';
+import { TenantLeaseOnboardingService } from './tenant-lease-onboarding.service.js';
 import { LandlordPermissionsGuard } from './landlord-permissions.guard.js';
 import { LandlordSubscriptionGuard } from './landlord-subscription.guard.js';
 import { ReportQuery, SelectPlanInput } from './dto/landlord-query.dto.js';
@@ -69,6 +78,7 @@ function actorRole(request: Request): MembershipRole | undefined {
 export class LandlordController {
   constructor(
     private readonly landlord: LandlordService,
+    private readonly leaseOnboarding: TenantLeaseOnboardingService,
     private readonly pdf: PdfService,
   ) {}
 
@@ -172,6 +182,40 @@ export class LandlordController {
     @Body() input: UnitInput,
   ) {
     return this.landlord.createUnit(organisationId, user.sub, actorRole(request), propertyId, input);
+  }
+
+  @Post('properties/:propertyId/units/batch')
+  createUnits(
+    @Param('organisationId', ParseUUIDPipe) organisationId: string,
+    @Param('propertyId', ParseUUIDPipe) propertyId: string,
+    @CurrentUser() user: AccessTokenClaims,
+    @Req() request: Request,
+    @Body() input: BatchUnitInput,
+  ) {
+    return this.landlord.createUnits(
+      organisationId,
+      user.sub,
+      actorRole(request),
+      propertyId,
+      input,
+    );
+  }
+
+  @Post('units/:unitId/assign-tenant')
+  assignTenantToUnit(
+    @Param('organisationId', ParseUUIDPipe) organisationId: string,
+    @Param('unitId', ParseUUIDPipe) unitId: string,
+    @CurrentUser() user: AccessTokenClaims,
+    @Req() request: Request,
+    @Body() input: AssignTenantInput,
+  ) {
+    return this.landlord.assignTenantToUnit(
+      organisationId,
+      user.sub,
+      actorRole(request),
+      unitId,
+      input,
+    );
   }
 
   @Patch('units/:unitId')
@@ -304,6 +348,38 @@ export class LandlordController {
     @Body() input: LeaseInput,
   ) {
     return this.landlord.createLease(organisationId, user.sub, actorRole(request), input);
+  }
+
+  @Post('tenant-lease-onboardings')
+  createTenantLeaseOnboarding(
+    @Param('organisationId', ParseUUIDPipe) organisationId: string,
+    @CurrentUser() user: AccessTokenClaims,
+    @Req() request: Request,
+    @Body() input: CreateTenantLeaseOnboardingInput,
+  ) {
+    return this.leaseOnboarding.create(
+      organisationId,
+      user.sub,
+      actorRole(request),
+      input,
+    );
+  }
+
+  @Post('leases/:leaseId/tenant-lease-onboardings/resend')
+  resendTenantLeaseOnboarding(
+    @Param('organisationId', ParseUUIDPipe) organisationId: string,
+    @Param('leaseId', ParseUUIDPipe) leaseId: string,
+    @CurrentUser() user: AccessTokenClaims,
+    @Req() request: Request,
+    @Body() input: ResendTenantLeaseOnboardingInput = new ResendTenantLeaseOnboardingInput(),
+  ) {
+    return this.leaseOnboarding.resend(
+      organisationId,
+      user.sub,
+      actorRole(request),
+      leaseId,
+      input,
+    );
   }
 
   @Patch('leases/:leaseId/status')
@@ -461,9 +537,14 @@ export class LandlordController {
     );
     const allocations = payment.allocations.length
       ? payment.allocations.map(({ allocatedAmount, rentCharge }) =>
-          `${rentCharge.tenancy.unit.property.name} / ${rentCharge.tenancy.unit.unitNumber} — ${rentCharge.period}: ${allocatedAmount.toString()} ${payment.organisation.currency}`,
+          `${rentCharge.tenancy.unit?.property.name ?? 'Property'} / ${rentCharge.tenancy.unit?.unitNumber ?? 'Rental space'} — ${rentCharge.period}: ${allocatedAmount.toString()} ${payment.organisation.currency}`,
         ).join('\n')
       : 'No rent charge allocation recorded';
+    const allocatedAmount = payment.allocations.reduce(
+      (total, allocation) => total.plus(allocation.allocatedAmount),
+      new Prisma.Decimal(0),
+    );
+    const unappliedCredit = payment.amount.minus(allocatedAmount);
     const content = await this.pdf.renderDocument('PropEase payment receipt', [
       {
         heading: 'Receipt details',
@@ -474,11 +555,16 @@ export class LandlordController {
           `Amount: ${payment.amount.toString()} ${payment.organisation.currency}`,
           `Method: ${payment.method.replaceAll('_', ' ')}`,
           `Reference: ${payment.reference ?? 'Not provided'}`,
+          `Charge period note: ${payment.note ?? 'Not provided'}`,
           `Received: ${payment.receivedAt.toISOString()}`,
-          `Record status: ${payment.reversedAt ? 'Reversed' : 'Manually recorded; not bank-verified'}`,
+          `Record status: ${payment.reversedAt ? 'Reversed' : 'User Recorded; not bank-verified'}`,
         ].join('\n'),
       },
       { heading: 'Rent allocations', body: allocations },
+      {
+        heading: 'Unapplied advance credit',
+        body: `${unappliedCredit.toString()} ${payment.organisation.currency} currently remains available for future rent charges.`,
+      },
       {
         heading: 'Important',
         body: 'This receipt confirms a payment record entered by the landlord. It is not proof of bank, card, or mobile-money settlement.',
@@ -796,6 +882,36 @@ export class LandlordController {
       actorRole(request),
       input,
     );
+  }
+}
+
+@Controller('tenant-lease-reviews/:token')
+export class TenantLeaseReviewController {
+  constructor(private readonly leaseOnboarding: TenantLeaseOnboardingService) {}
+
+  @Get()
+  @Header('Cache-Control', 'no-store')
+  getReview(@Param('token') token: string) {
+    return this.leaseOnboarding.getPublicReview(token);
+  }
+
+  @Post('response')
+  @Header('Cache-Control', 'no-store')
+  respond(
+    @Param('token') token: string,
+    @Body() input: TenantLeaseReviewInput,
+  ) {
+    return this.leaseOnboarding.respond(token, input);
+  }
+
+  @Get('document')
+  @Header('Cache-Control', 'no-store')
+  async document(@Param('token') token: string): Promise<StreamableFile> {
+    const pdf = await this.leaseOnboarding.getPublicDocument(token);
+    return new StreamableFile(pdf, {
+      type: 'application/pdf',
+      disposition: 'inline; filename="lease-agreement.pdf"',
+    });
   }
 }
 

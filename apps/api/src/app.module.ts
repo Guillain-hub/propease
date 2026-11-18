@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { APP_GUARD } from '@nestjs/core';
 import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { BullModule } from '@nestjs/bullmq';
+import { fileURLToPath } from 'node:url';
 import { validateEnvironment } from './config/validate-environment.js';
 import { PrismaModule } from './database/prisma.module.js';
 import { HealthModule } from './health/health.module.js';
@@ -20,6 +21,7 @@ import { LandlordModule } from './landlord/landlord.module.js';
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
+      envFilePath: [fileURLToPath(new URL('../.env', import.meta.url)), '.env'],
       validate: validateEnvironment,
     }),
     BullModule.forRootAsync({
@@ -42,6 +44,8 @@ import { LandlordModule } from './landlord/landlord.module.js';
               ? decodeURIComponent(redisUrl.password)
               : undefined,
             db,
+            maxRetriesPerRequest: null,
+            lazyConnect: true,
             ...(redisUrl.protocol === 'rediss:' ? { tls: {} } : {}),
           },
           defaultJobOptions: {

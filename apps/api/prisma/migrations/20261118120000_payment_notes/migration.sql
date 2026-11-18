@@ -1,0 +1,2 @@
+ALTER TABLE "payments"
+ADD COLUMN "note" VARCHAR(240);

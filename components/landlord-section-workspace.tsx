@@ -1,26 +1,46 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDownToLine,
+  Bath,
+  Banknote,
+  BellRing,
+  BedDouble,
   Building2,
+  CalendarDays,
   Check,
   ClipboardCheck,
   CircleDollarSign,
+  CircleAlert,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Droplets,
   FileText,
+  Home,
+  Landmark,
   KeyRound,
   LoaderCircle,
+  MapPin,
+  Ruler,
+  SlidersHorizontal,
   Pencil,
   Plus,
   Receipt,
   RefreshCw,
+  RotateCcw,
   Search,
+  Send,
+  ShieldCheck,
+  Smartphone,
   Trash2,
   Upload,
+  UserRound,
   Users,
   X,
   Wrench,
+  Zap,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
@@ -39,12 +59,82 @@ type SectionName =
   | "Team"
   | "Subscription"
   | "Settings";
+type PortfolioRow = {
+  property: ValueRecord;
+  propertyId: string;
+  leases: ValueRecord[];
+  activeLeaseCount: number;
+  pendingLeaseCount: number;
+  inspectionRows: ValueRecord[];
+  scheduledInspectionCount: number;
+  completedInspectionCount: number;
+  utilityBillCount: number;
+  rentStatus: "PAID" | "PARTIAL" | "UNPAID" | "OVERDUE" | "NOT_CHARGED" | "NO_TENANTS";
+  missingLeaseTenancies: number;
+  units: number;
+  occupied: number;
+  vacant: number;
+  occupancy: number;
+  tenants: number;
+  expected: bigint;
+  collected: bigint;
+  outstanding: bigint;
+  expenses: bigint;
+  overdue: number;
+  openMaintenance: number;
+  expiredLeases: number;
+  expiringLeases: number;
+  missingInspections: number;
+  attention: number;
+  attentionItems: PropertyAttentionItem[];
+};
+type PropertyQuickFilter = "all" | "outstanding" | "vacant" | "expiring";
+type PropertyActionTab = "overview" | "ledger" | "repairs" | "notifications";
+type PropertyAttentionItem = {
+  id: string;
+  title: string;
+  detail: string;
+  section: string;
+  unitId?: string;
+};
+type UnitLedgerDetails = {
+  unit: ValueRecord;
+  unitId: string;
+  tenancy: ValueRecord | null;
+  activeTenancy: ValueRecord | null;
+  upcomingTenancy: ValueRecord | null;
+  occupied: boolean;
+  vacant: boolean;
+  tenantName: string;
+  tenantPhone: string;
+  leaseStatus: string;
+  leaseEndDate: string;
+  expiring: boolean;
+  rentAmount: bigint;
+  balance: bigint;
+  rentStatus: PortfolioRow["rentStatus"];
+  depositHeld: bigint;
+  depositRequired: bigint;
+  openMaintenance: ValueRecord[];
+};
+type PropertyActionState =
+  | { type: "add-unit"; propertyId: string }
+  | { type: "manage-property"; propertyId: string; initialTab?: "overview" | "notifications" }
+  | { type: "assign"; propertyId: string; unitId: string }
+  | { type: "rent"; propertyId: string; unitId: string }
+  | {
+      type: "manage";
+      propertyId: string;
+      unitId: string;
+      initialTab?: PropertyActionTab;
+    };
 type ValueRecord = Record<string, unknown>;
 type Choice = { value: string; label: string };
 type Field = {
   name: string;
   label: string;
   type?: "date" | "datetime-local" | "number" | "email" | "textarea" | "multi" | "image";
+  step?: string;
   required?: boolean;
   disabled?: boolean;
   options?: Choice[];
@@ -143,9 +233,155 @@ function relatedProperty(row: ValueRecord): ValueRecord {
   );
 }
 
+function amountMinorUnits(value: unknown): bigint {
+  const text = typeof value === "bigint" ? null : String(value ?? "0").trim();
+  if (typeof value === "bigint") return value;
+  const match = /^(-?)(\d+)(?:\.(\d{0,2}))?$/.exec(text ?? "");
+  if (!match) throw new Error("A monetary amount from the API is invalid.");
+  const minor = BigInt(match[2]) * BigInt(100) + BigInt((match[3] ?? "").padEnd(2, "0") || "0");
+  return match[1] === "-" ? -minor : minor;
+}
+
+function tryAmountMinorUnits(value: string): bigint | null {
+  if (!/^-?\d+(?:\.\d{0,2})?$/.test(value.trim())) return null;
+  return amountMinorUnits(value);
+}
+
+function minorUnitsInput(value: bigint, currency: string): string {
+  if (currency === "RWF" && value % BigInt(100) === BigInt(0)) return (value / BigInt(100)).toString();
+  const negative = value < BigInt(0);
+  const absolute = negative ? -value : value;
+  const whole = absolute / BigInt(100);
+  const fraction = String(absolute % BigInt(100)).padStart(2, "0");
+  return `${negative ? "-" : ""}${whole}.${fraction}`;
+}
+
 function formatAmount(value: unknown, currency: string): string {
-  const amount = Number(value ?? 0);
-  return `${Number.isFinite(amount) ? new Intl.NumberFormat("en").format(amount) : "0"} ${currency}`;
+  const amount = amountMinorUnits(value);
+  const negative = amount < BigInt(0);
+  const absolute = negative ? -amount : amount;
+  const whole = new Intl.NumberFormat("en").format(absolute / BigInt(100));
+  const remainder = absolute % BigInt(100);
+  const fraction = remainder === BigInt(0)
+    ? ""
+    : `.${String(remainder).padStart(2, "0").replace(/0+$/, "")}`;
+  const formatted = `${negative ? "-" : ""}${whole}${fraction}`;
+  return currency === "RWF" ? `RWF ${formatted}` : `${formatted} ${currency}`;
+}
+
+function propertyIdFrom(row: ValueRecord): string {
+  return stringValue(
+    nested(row, "property", "id") ??
+      row.propertyId ??
+      nested(row, "unit", "property", "id") ??
+      nested(row, "tenancy", "property", "id") ??
+      nested(row, "tenancy", "propertyId") ??
+      nested(row, "tenancy", "unit", "property", "id"),
+    "",
+  );
+}
+
+function propertyScopedData(
+  section: SectionName,
+  data: ValueRecord,
+  propertyId?: string,
+  unitId?: string,
+): ValueRecord {
+  if (!propertyId) return data;
+
+  const scoped: ValueRecord = { ...data };
+  const propertyRows = rowsFor(data, "properties").filter((row) => row.id === propertyId);
+  const unitRows = rowsFor(data, "units").filter(
+    (row) =>
+      propertyIdFrom(row) === propertyId &&
+      (!unitId || stringValue(row.id, "") === unitId),
+  );
+  const unitIds = new Set(unitRows.map((row) => stringValue(row.id, "")));
+  const tenancyRows = rowsFor(data, "tenancies").filter(
+    (row) =>
+      propertyIdFrom(row) === propertyId &&
+      (!unitId || unitIds.has(stringValue(nested(row, "unit", "id"), ""))),
+  );
+  const tenancyIds = new Set(tenancyRows.map((row) => stringValue(row.id, "")));
+  const tenantIds = new Set(
+    tenancyRows.map((row) => stringValue(nested(row, "tenant", "id"), "")),
+  );
+
+  if (Array.isArray(data.properties)) scoped.properties = propertyRows;
+  if (Array.isArray(data.units)) scoped.units = unitRows;
+  if (Array.isArray(data.tenancies)) scoped.tenancies = tenancyRows;
+  if (Array.isArray(data.tenants)) {
+    scoped.tenants = rowsFor(data, "tenants").filter(
+      (row) =>
+        tenantIds.has(stringValue(row.id, "")) ||
+        (!unitId && rowsFor(row, "tenancies").length === 0),
+    );
+  }
+  if (Array.isArray(data.leases)) {
+    scoped.leases = rowsFor(data, "leases").filter((row) =>
+      tenancyIds.has(stringValue(nested(row, "tenancy", "id"), "")),
+    );
+  }
+  if (Array.isArray(data.inspections)) {
+    scoped.inspections = rowsFor(data, "inspections").filter((row) =>
+      unitIds.has(stringValue(nested(row, "unit", "id"), "")),
+    );
+  }
+  if (Array.isArray(data.charges)) {
+    scoped.charges = rowsFor(data, "charges").filter((row) =>
+      tenancyIds.has(stringValue(nested(row, "tenancy", "id"), "")),
+    );
+  }
+  if (Array.isArray(data.deposits)) {
+    scoped.deposits = rowsFor(data, "deposits").filter((row) =>
+      tenancyIds.has(stringValue(nested(row, "tenancy", "id"), "")),
+    );
+  }
+  if (Array.isArray(data.payments)) {
+    scoped.payments = rowsFor(data, "payments").filter((row) =>
+      rowsFor(row, "allocations").some(
+        (allocation) =>
+          unitId
+            ? stringValue(nested(allocation, "rentCharge", "tenancy", "unit", "id"), "") === unitId
+            : stringValue(
+                nested(allocation, "rentCharge", "tenancy", "unit", "propertyId"),
+                "",
+              ) === propertyId,
+      ),
+    );
+  }
+  if (Array.isArray(data.expenses)) {
+    scoped.expenses = rowsFor(data, "expenses").filter(
+      (row) =>
+        propertyIdFrom(row) === propertyId &&
+        (!unitId ||
+          !nested(row, "unit", "id") ||
+          stringValue(nested(row, "unit", "id"), "") === unitId),
+    );
+  }
+  if (Array.isArray(data.utilityBills)) {
+    scoped.utilityBills = rowsFor(data, "utilityBills").filter(
+      (row) =>
+        propertyIdFrom(row) === propertyId &&
+        (!unitId ||
+          !rowsFor(row, "allocations").length ||
+          rowsFor(row, "allocations").some(
+            (allocation) => stringValue(nested(allocation, "unit", "id"), "") === unitId,
+          )),
+    );
+  }
+  if (Array.isArray(data.requests)) {
+    scoped.requests = rowsFor(data, "requests").filter((row) =>
+      unitIds.has(stringValue(nested(row, "unit", "id"), "")),
+    );
+  }
+  if (Array.isArray(data.notices)) {
+    scoped.notices = rowsFor(data, "notices").filter((row) =>
+      tenancyIds.has(stringValue(nested(row, "tenancy", "id"), "")),
+    );
+  }
+
+  return scoped;
 }
 
 function dateLabel(value: unknown): string {
@@ -154,6 +390,18 @@ function dateLabel(value: unknown): string {
   return Number.isNaN(parsed.getTime())
     ? value
     : new Intl.DateTimeFormat("en", { dateStyle: "medium" }).format(parsed);
+}
+
+function rentPeriodLabel(value: unknown): string {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}$/.test(value)) {
+    return stringValue(value, "Rent charge");
+  }
+  const [year, month] = value.split("-").map(Number);
+  return new Intl.DateTimeFormat("en", {
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(new Date(Date.UTC(year, month - 1, 1)));
 }
 
 async function apiRequest<T>(
@@ -234,6 +482,12 @@ export function LandlordSectionWorkspace({
   role,
   userId,
   onUpdated,
+  propertyFilterId,
+  unitFilterId,
+  initialPropertySearch,
+  portfolioPropertyId,
+  onPortfolioPropertyChange,
+  unitDetailsOnly = false,
 }: {
   section: SectionName;
   organisationId: string;
@@ -241,11 +495,18 @@ export function LandlordSectionWorkspace({
   role: string;
   userId: string;
   onUpdated: () => void;
+  propertyFilterId?: string;
+  unitFilterId?: string;
+  initialPropertySearch?: string;
+  portfolioPropertyId?: string;
+  onPortfolioPropertyChange?: (propertyId: string) => void;
+  unitDetailsOnly?: boolean;
 }) {
   const [data, setData] = useState<ValueRecord>({});
   const [form, setForm] = useState<Record<string, string>>({});
   const [editingId, setEditingId] = useState<string | null>(null);
   const [formOpen, setFormOpen] = useState(false);
+  const [paymentReviewStep, setPaymentReviewStep] = useState<0 | 1>(0);
   const [teamMemberToRemove, setTeamMemberToRemove] = useState<ValueRecord | null>(null);
   const [recordToArchive, setRecordToArchive] = useState<{
     kind: "tenant" | "unit";
@@ -263,6 +524,33 @@ export function LandlordSectionWorkspace({
   const [saving, setSaving] = useState(false);
   const [removingTeamMember, setRemovingTeamMember] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [propertySetupOpen, setPropertySetupOpen] = useState(false);
+  const [propertySetupContext, setPropertySetupContext] = useState<{
+    property: ValueRecord;
+    units: ValueRecord[];
+  } | null>(null);
+  const [propertyAction, setPropertyAction] = useState<PropertyActionState | null>(null);
+  const [attentionReadState, setAttentionReadState] = useState<{
+    key: string;
+    ids: Set<string>;
+  }>({ key: "", ids: new Set() });
+  const [attentionReadError, setAttentionReadError] = useState<string | null>(null);
+  const [tenantLeaseOnboardingOpen, setTenantLeaseOnboardingOpen] = useState(false);
+  const [tenantLeaseOnboardingUnitId, setTenantLeaseOnboardingUnitId] = useState<string | null>(null);
+  const [leaseResendSelection, setLeaseResendSelection] = useState<ValueRecord | null>(null);
+  const [createdTenants, setCreatedTenants] = useState<ValueRecord[]>([]);
+  const [propertySearch, setPropertySearch] = useState(initialPropertySearch ?? "");
+  const [propertyTypeFilter, setPropertyTypeFilter] = useState("all");
+  const [occupancyFilter, setOccupancyFilter] = useState("all");
+  const [propertyStatusFilter, setPropertyStatusFilter] = useState("all");
+  const [propertyQuickFilter, setPropertyQuickFilter] =
+    useState<PropertyQuickFilter>("all");
+  const [expandedPropertyIds, setExpandedPropertyIds] = useState<
+    Record<string, boolean>
+  >({});
+  const [expensePeriod, setExpensePeriod] = useState(new Date().toISOString().slice(0, 7));
+  const [propertyPage, setPropertyPage] = useState(1);
+  const [showAdditionalFilters, setShowAdditionalFilters] = useState(false);
   const formDialogRef = useRef<HTMLDivElement>(null);
   const addButtonRef = useRef<HTMLButtonElement>(null);
   const savingRef = useRef(saving);
@@ -271,6 +559,54 @@ export function LandlordSectionWorkspace({
   const textRequestResolver = useRef<((value: string | null) => void) | null>(null);
 
   const base = `/organisations/${organisationId}/landlord`;
+  const attentionReadStorageKey = `propease:read-property-notifications:${organisationId}:${userId}`;
+  const attentionReadIds = useMemo(
+    () => attentionReadState.key === attentionReadStorageKey
+      ? attentionReadState.ids
+      : new Set<string>(),
+    [attentionReadState, attentionReadStorageKey],
+  );
+
+  useEffect(() => {
+    try {
+      const saved = window.localStorage.getItem(attentionReadStorageKey);
+      const parsed: unknown = saved ? JSON.parse(saved) : [];
+      if (!Array.isArray(parsed) || !parsed.every((id) => typeof id === "string")) {
+        throw new Error("Saved notification state is invalid.");
+      }
+      setAttentionReadState({ key: attentionReadStorageKey, ids: new Set(parsed) });
+      setAttentionReadError(null);
+    } catch {
+      setAttentionReadState({ key: attentionReadStorageKey, ids: new Set() });
+      setAttentionReadError("Notification read status could not be loaded from this browser.");
+    }
+  }, [attentionReadStorageKey]);
+
+  function markAttentionRead(itemId: string) {
+    const ids = new Set(
+      attentionReadState.key === attentionReadStorageKey
+        ? attentionReadState.ids
+        : [],
+    );
+    ids.add(itemId);
+    try {
+      window.localStorage.setItem(attentionReadStorageKey, JSON.stringify([...ids]));
+      setAttentionReadState({ key: attentionReadStorageKey, ids });
+      setAttentionReadError(null);
+    } catch {
+      setAttentionReadError("This notification could not be marked as read in this browser.");
+    }
+  }
+
+  useEffect(() => {
+    if (section !== "Properties") return;
+    setPropertySearch(initialPropertySearch ?? "");
+    setPropertyPage(1);
+  }, [initialPropertySearch, section]);
+
+  useEffect(() => {
+    if (section === "Properties") setPropertyPage(1);
+  }, [portfolioPropertyId, section]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -278,12 +614,30 @@ export function LandlordSectionWorkspace({
     setLoadError(null);
     try {
       const endpoints: Record<SectionName, Array<[string, string, string?]>> = {
-        Properties: [
+        Properties: role === "MAINTENANCE_STAFF"
+          ? [["maintenance", "requests", "requests"]]
+          : [
           ["properties", "properties", "properties"],
+          ["units", "units", "units"],
+          ["tenancies", "tenancies", "tenancies"],
+          ["tenants", "tenants", "tenants"],
+          ["leases", "leases", "leases"],
+          ["inspections", "inspections", "inspections"],
+          ["rent/charges", "charges", "charges"],
+          ["rent/payments", "payments", "payments"],
+          ["rent/deposits", "deposits", "deposits"],
+          ["expenses", "expenses", "expenses"],
+          ["utilities", "utilityBills", "utilityBills"],
+          ["maintenance", "requests", "requests"],
+          ["notices", "notices", "notices"],
+          ["", "portfolio"],
           ...(role === "OWNER" || role === "ADMIN"
             ? [["property-owners", "propertyOwners", "owners"] as [string, string, string]]
             : []),
-        ],
+          ...(role === "OWNER" || role === "ADMIN"
+            ? [["team", "members", "members"] as [string, string, string]]
+            : []),
+          ],
         Units: [["units", "units", "units"], ["properties", "properties", "properties"]],
         Tenants: [["tenants", "tenants", "tenants"], ["tenancies", "tenancies", "tenancies"], ["units", "units", "units"]],
         Leases: [["leases", "leases", "leases"], ["tenancies", "tenancies", "tenancies"], ["tenants", "tenants", "tenants"]],
@@ -306,13 +660,17 @@ export function LandlordSectionWorkspace({
         Settings: [["settings", "settings"]],
       };
       const entries = endpoints[section];
-      const results = await Promise.all(
-        entries.map(async ([path, key, collection]) => {
-          const value = await apiRequest<ValueRecord>(`${base}/${path}`);
-          return [key, collection ? rowsFor(value, collection) : value] as const;
-        }),
+      const results: Array<readonly [string, unknown]> = [];
+      for (const [path, key, collection] of entries) {
+        const value = await apiRequest<ValueRecord>(`${base}${path ? `/${path}` : ""}`);
+        results.push([key, collection ? rowsFor(value, collection) : value]);
+      }
+      const next = propertyScopedData(
+        section,
+        Object.fromEntries(results) as ValueRecord,
+        propertyFilterId,
+        unitFilterId,
       );
-      const next = Object.fromEntries(results) as ValueRecord;
       setData(next);
       if (section === "Settings") {
         const organisation = record(next.settings).organisation;
@@ -334,7 +692,7 @@ export function LandlordSectionWorkspace({
     } finally {
       setLoading(false);
     }
-  }, [base, section, refreshKey, role]);
+  }, [base, section, refreshKey, role, propertyFilterId, unitFilterId]);
 
   useEffect(() => {
     void load();
@@ -353,6 +711,8 @@ export function LandlordSectionWorkspace({
     setEditingId(null);
     setFormOpen(false);
     setForm({});
+    setPaymentReviewStep(0);
+    setPropertySetupOpen(false);
   }, [section]);
 
   useEffect(() => {
@@ -398,10 +758,588 @@ export function LandlordSectionWorkspace({
   const availableUnitCount = units.filter((unit) => unit.status === "AVAILABLE").length;
   const tenants = rowsFor(data, "tenants");
   const tenancies = rowsFor(data, "tenancies");
+  const leases = rowsFor(data, "leases");
   const charges = rowsFor(data, "charges");
   const deposits = rowsFor(data, "deposits");
+  const portfolioRows = useMemo<PortfolioRow[]>(() => {
+    const now = new Date();
+    const today = now.toISOString().slice(0, 10);
+    const soon = new Date(now.getTime() + 60 * 24 * 60 * 60 * 1000)
+      .toISOString()
+      .slice(0, 10);
+    const currentMonth = now.toISOString().slice(0, 7);
+    const selectedExpenseMonth = expensePeriod || currentMonth;
+    const inspectionRows = rowsFor(data, "inspections");
+    const maintenanceRows = rowsFor(data, "requests");
+    const leaseRows = rowsFor(data, "leases");
+    const paymentRows = rowsFor(data, "payments");
+    const expenseRows = rowsFor(data, "expenses");
+
+    return properties
+      .filter((property) => !portfolioPropertyId || stringValue(property.id, "") === portfolioPropertyId)
+      .map((property) => {
+      const propertyId = stringValue(property.id, "");
+      const propertyUnits = units.filter(
+        (unit) => propertyIdFrom(unit) === propertyId && unit.status !== "ARCHIVED",
+      );
+      const unitIds = new Set(propertyUnits.map((unit) => stringValue(unit.id, "")));
+      const activeTenancies = tenancies.filter(
+        (tenancy) =>
+          propertyIdFrom(tenancy) === propertyId &&
+          tenancy.status === "ACTIVE" &&
+          (!propertyUnits.length || unitIds.has(stringValue(nested(tenancy, "unit", "id"), ""))),
+      );
+      const propertyTenancyIds = new Set(
+        tenancies
+          .filter((tenancy) => propertyIdFrom(tenancy) === propertyId)
+          .map((tenancy) => stringValue(tenancy.id, "")),
+      );
+      const propertyLeases = leaseRows.filter((lease) =>
+        propertyTenancyIds.has(stringValue(nested(lease, "tenancy", "id"), "")),
+      );
+      const leaseTenancy = (lease: ValueRecord) =>
+        tenancies.find((tenancy) => stringValue(tenancy.id, "") === stringValue(nested(lease, "tenancy", "id"), ""));
+      const leaseUnitId = (lease: ValueRecord) =>
+        stringValue(nested(lease, "tenancy", "unit", "id") ?? nested(leaseTenancy(lease), "unit", "id"), "");
+      const propertyInspections = inspectionRows.filter((inspection) =>
+        unitIds.has(stringValue(nested(inspection, "unit", "id"), "")),
+      );
+      const propertyUtilityBills = rowsFor(data, "utilityBills").filter(
+        (bill) =>
+          propertyIdFrom(bill) === propertyId &&
+          stringValue(bill.period, "") === selectedExpenseMonth &&
+          !bill.reversedAt,
+      );
+      const leasedTenancyIds = new Set(
+        propertyLeases.map((lease) => stringValue(nested(lease, "tenancy", "id"), "")),
+      );
+      const missingLeaseTenancies = tenancies.filter(
+        (tenancy) =>
+          propertyIdFrom(tenancy) === propertyId &&
+          ["ACTIVE", "UPCOMING"].includes(stringValue(tenancy.status, "")) &&
+          !leasedTenancyIds.has(stringValue(tenancy.id, "")),
+      ).length;
+      const activeTenantIds = new Set(
+        activeTenancies.map((tenancy) => stringValue(nested(tenancy, "tenant", "id"), "")),
+      );
+      const activeUnitIds = new Set(
+        tenancies
+          .filter((tenancy) => propertyIdFrom(tenancy) === propertyId && tenancy.status === "ACTIVE")
+          .map((tenancy) => stringValue(nested(tenancy, "unit", "id"), ""))
+          .filter(Boolean),
+      );
+      const reservedUnitIds = new Set(
+        tenancies
+          .filter((tenancy) => propertyIdFrom(tenancy) === propertyId && tenancy.status === "UPCOMING")
+          .map((tenancy) => stringValue(nested(tenancy, "unit", "id"), ""))
+          .filter(Boolean),
+      );
+      const occupied = propertyUnits.filter(
+        (unit) => unit.status === "OCCUPIED" || activeUnitIds.has(stringValue(unit.id, "")),
+      ).length;
+      const vacant = propertyUnits.filter(
+        (unit) =>
+          unit.status === "AVAILABLE" &&
+          !activeUnitIds.has(stringValue(unit.id, "")) &&
+          !reservedUnitIds.has(stringValue(unit.id, "")),
+      ).length;
+      const activeTenancyIds = new Set(activeTenancies.map((tenancy) => stringValue(tenancy.id, "")));
+      const currentCharges = charges.filter(
+        (charge) =>
+          activeTenancyIds.has(stringValue(nested(charge, "tenancy", "id"), "")) &&
+          stringValue(charge.period, "") === currentMonth &&
+          charge.status !== "VOID",
+      );
+      const currentChargeTenancyIds = new Set(
+        currentCharges.map((charge) => stringValue(nested(charge, "tenancy", "id"), "")),
+      );
+      const currentChargeBalance = currentCharges.reduce(
+        (sum, charge) => sum + amountMinorUnits(charge.balance),
+        BigInt(0),
+      );
+      const currentChargePaid = currentCharges.reduce(
+        (sum, charge) => {
+          const paid = amountMinorUnits(charge.amount) - amountMinorUnits(charge.balance);
+          return sum + (paid > BigInt(0) ? paid : BigInt(0));
+        },
+        BigInt(0),
+      );
+      const hasOverdueCurrentCharge = currentCharges.some(
+        (charge) =>
+          amountMinorUnits(charge.balance) > BigInt(0) &&
+          (charge.status === "OVERDUE" ||
+            (Boolean(charge.dueDate) && stringValue(charge.dueDate, "").slice(0, 10) < today)),
+      );
+      const rentStatus: PortfolioRow["rentStatus"] =
+        activeTenancies.length === 0
+          ? "NO_TENANTS"
+          : currentCharges.length === 0
+            ? "NOT_CHARGED"
+            : currentChargeBalance <= BigInt(0)
+              ? currentChargeTenancyIds.size < activeTenancies.length
+                ? "NOT_CHARGED"
+                : "PAID"
+              : hasOverdueCurrentCharge
+                ? "OVERDUE"
+                : currentChargePaid > BigInt(0)
+                  ? "PARTIAL"
+                  : "UNPAID";
+      const propertyCharges = charges.filter(
+        (charge) =>
+            propertyTenancyIds.has(stringValue(nested(charge, "tenancy", "id"), "")) &&
+            stringValue(charge.period, "") === currentMonth &&
+            charge.status !== "VOID",
+      );
+      const collected = paymentRows
+        .filter(
+          (payment) =>
+            !payment.reversedAt &&
+            stringValue(payment.receivedAt, "").slice(0, 7) === currentMonth,
+        )
+        .reduce(
+            (sum, payment) => {
+              const paymentPropertyId = stringValue(
+                nested(payment, "tenancy", "unit", "propertyId"),
+                "",
+              );
+              if (paymentPropertyId) {
+                return paymentPropertyId === propertyId
+                  ? sum + amountMinorUnits(payment.amount)
+                  : sum;
+              }
+              return sum + rowsFor(payment, "allocations")
+                .filter(
+                  (allocation) =>
+                    stringValue(
+                      nested(allocation, "rentCharge", "tenancy", "unit", "propertyId"),
+                      "",
+                    ) === propertyId,
+                )
+                .reduce(
+                  (allocationSum, allocation) =>
+                    allocationSum + amountMinorUnits(allocation.allocatedAmount),
+                  BigInt(0),
+                );
+            },
+            BigInt(0),
+        );
+      const outstanding = propertyCharges.reduce(
+          (sum, charge) => sum + amountMinorUnits(charge.balance),
+          BigInt(0),
+      );
+      const expected = activeTenancies.reduce(
+        (sum, tenancy) => {
+          const currentLease = leaseRows.find(
+            (lease) =>
+              nested(lease, "tenancy", "id") === tenancy.id &&
+              lease.status === "ACTIVE" &&
+              stringValue(lease.startDate, "").slice(0, 10) <= today &&
+              stringValue(lease.endDate, "").slice(0, 10) >= today,
+          );
+          const unit = propertyUnits.find((item) => item.id === nested(tenancy, "unit", "id"));
+          return sum + amountMinorUnits(currentLease?.rentAmount ?? unit?.rentAmount);
+        },
+        BigInt(0),
+      );
+      const expenses = expenseRows
+        .filter(
+          (expense) =>
+            propertyIdFrom(expense) === propertyId &&
+            stringValue(expense.date, "").slice(0, 7) === selectedExpenseMonth &&
+            !expense.reversedAt,
+        )
+        .reduce((sum, expense) => sum + amountMinorUnits(expense.amount), BigInt(0));
+      const overdue = charges.filter(
+        (charge) =>
+        propertyTenancyIds.has(stringValue(nested(charge, "tenancy", "id"), "")) &&
+          charge.status !== "VOID" &&
+          amountMinorUnits(charge.balance) > BigInt(0) &&
+          stringValue(charge.dueDate, "").slice(0, 10) < today,
+      ).length;
+      const openMaintenance = maintenanceRows.filter(
+        (request) =>
+          unitIds.has(stringValue(nested(request, "unit", "id"), "")) &&
+          !["COMPLETED", "REJECTED"].includes(stringValue(request.status, "")),
+      ).length;
+      const expiringLeases = leaseRows.filter((lease) => {
+        const endDate = stringValue(lease.endDate, "").slice(0, 10);
+        const startDate = stringValue(lease.startDate, "").slice(0, 10);
+        return (
+          propertyTenancyIds.has(stringValue(nested(lease, "tenancy", "id"), "")) &&
+          lease.status === "ACTIVE" &&
+          startDate <= today &&
+          endDate >= today &&
+          endDate <= soon
+        );
+      }).length;
+      const expiredLeases = leaseRows.filter(
+        (lease) =>
+          propertyTenancyIds.has(stringValue(nested(lease, "tenancy", "id"), "")) &&
+          lease.status === "ACTIVE" &&
+          stringValue(lease.endDate, "").slice(0, 10) < today,
+      ).length;
+      const moveInInspectedTenancies = new Set(
+        inspectionRows
+          .filter(
+            (inspection) =>
+              inspection.type === "MOVE_IN" && inspection.status === "COMPLETED",
+          )
+          .map((inspection) => stringValue(nested(inspection, "tenancy", "id"), "")),
+      );
+      const missingInspections = activeTenancies.filter((tenancy) =>
+        !moveInInspectedTenancies.has(stringValue(tenancy.id, "")),
+      ).length;
+      const attentionItems: PropertyAttentionItem[] = [];
+      const addAttention = (
+        id: string,
+        title: string,
+        detail: string,
+        section: string,
+        unitId?: string,
+      ) => {
+        attentionItems.push({
+          id,
+          title,
+          detail,
+          section,
+          ...(unitId ? { unitId } : {}),
+        });
+      };
+      for (const unit of propertyUnits) {
+        const unitId = stringValue(unit.id, "");
+        if (unit.status === "AVAILABLE" && !activeUnitIds.has(unitId) && !reservedUnitIds.has(unitId)) {
+          addAttention(
+            `vacant-${stringValue(unit.id)}`,
+            `Unit ${stringValue(unit.unitNumber)} is vacant`,
+            "Add a tenant and prepare a lease.",
+            "Units",
+            stringValue(unit.id),
+          );
+        }
+      }
+      for (const lease of propertyLeases) {
+        const tenancy = leaseTenancy(lease);
+        const unitId = leaseUnitId(lease);
+        const tenantName = stringValue(
+          nested(lease, "tenancy", "tenant", "legalName") ?? nested(tenancy, "tenant", "legalName"),
+          "Tenant",
+        );
+        const unitNumber = stringValue(
+          nested(lease, "tenancy", "unit", "unitNumber") ?? nested(tenancy, "unit", "unitNumber"),
+          "—",
+        );
+        const status = stringValue(lease.status, "");
+        if (status === "PENDING_TENANT_REVIEW") {
+          addAttention(
+            `lease-review-${stringValue(lease.id)}`,
+            "Lease awaiting tenant response",
+            `${tenantName} · ${unitNumber}`,
+            "Leases",
+            unitId,
+          );
+        } else if (status === "CHANGES_REQUESTED") {
+          addAttention(
+            `lease-changes-${stringValue(lease.id)}`,
+            "Tenant requested lease changes",
+            `${tenantName} · Review and resend the lease.`,
+            "Leases",
+            unitId,
+          );
+        } else if (status === "TENANT_ACCEPTED") {
+          addAttention(
+            `lease-accepted-${stringValue(lease.id)}`,
+            "Lease accepted",
+            `${tenantName} · Prepare for lease activation.`,
+            "Leases",
+            unitId,
+          );
+        } else if (status === "TENANT_DECLINED") {
+          addAttention(
+            `lease-declined-${stringValue(lease.id)}`,
+            "Tenant declined the lease",
+            `${tenantName} · Review next steps.`,
+            "Leases",
+            unitId,
+          );
+        } else if (status === "DRAFT") {
+          addAttention(
+            `lease-draft-${stringValue(lease.id)}`,
+            "Lease draft needs review",
+            `${tenantName} · Finish and send the lease.`,
+            "Leases",
+            unitId,
+          );
+        }
+      }
+      for (const charge of charges) {
+        const tenancyId = stringValue(nested(charge, "tenancy", "id"), "");
+        if (
+          !propertyTenancyIds.has(tenancyId) ||
+          charge.status === "VOID" ||
+          amountMinorUnits(charge.balance) <= BigInt(0)
+        ) continue;
+        const dueDate = stringValue(charge.dueDate, "").slice(0, 10);
+        const unitId = stringValue(nested(charge, "tenancy", "unit", "id"), "");
+        const overdueCharge = charge.status === "OVERDUE" || Boolean(dueDate && dueDate < today);
+        addAttention(
+          `rent-${stringValue(charge.id)}`,
+          overdueCharge ? "Overdue rent" : "Outstanding rent",
+          `${stringValue(nested(charge, "tenancy", "tenant", "legalName"), "Tenant")} · ${formatAmount(charge.balance, currency)}`,
+          "Rent & Deposits",
+          unitId,
+        );
+      }
+      for (const deposit of deposits) {
+        const tenancyId = stringValue(nested(deposit, "tenancy", "id"), "");
+        if (!propertyTenancyIds.has(tenancyId)) continue;
+        const tenancy = tenancies.find(
+          (item) =>
+            stringValue(item.id, "") === tenancyId &&
+            propertyIdFrom(item) === propertyId,
+        );
+        const lease = propertyLeases.find(
+          (item) => stringValue(nested(item, "tenancy", "id"), "") === tenancyId,
+        );
+        const depositStatus = stringValue(deposit.status, "");
+        const required = amountMinorUnits(deposit.requiredAmount);
+        const received = amountMinorUnits(deposit.receivedAmount);
+        const unitId = stringValue(nested(tenancy, "unit", "id"), "");
+        const tenantName = stringValue(nested(tenancy, "tenant", "legalName"), "Tenant");
+        if (
+          ["TENANT_ACCEPTED", "ACTIVE"].includes(stringValue(lease?.status, "")) &&
+          ["NOT_RECEIVED", "PARTIALLY_RECEIVED"].includes(depositStatus) &&
+          required > received
+        ) {
+          addAttention(
+            `deposit-outstanding-${stringValue(deposit.id)}`,
+            "Security deposit outstanding",
+            `${tenantName} · ${formatAmount(required - received, currency)} remaining.`,
+            "Rent & Deposits",
+            unitId,
+          );
+        } else if (
+          ["ENDED", "TERMINATED"].includes(stringValue(tenancy?.status, "")) &&
+          ["HELD", "PARTIALLY_REFUNDED"].includes(depositStatus) &&
+          amountMinorUnits(deposit.heldBalance) > BigInt(0)
+        ) {
+          addAttention(
+            `deposit-refund-${stringValue(deposit.id)}`,
+            "Deposit refund or deductions pending",
+            `${tenantName} · Review the held balance of ${formatAmount(deposit.heldBalance, currency)}.`,
+            "Rent & Deposits",
+            unitId,
+          );
+        }
+      }
+      for (const request of maintenanceRows) {
+        const unitId = stringValue(nested(request, "unit", "id"), "");
+        if (!unitIds.has(unitId) || ["COMPLETED", "REJECTED"].includes(stringValue(request.status, ""))) continue;
+        addAttention(
+          `maintenance-${stringValue(request.id)}`,
+          "Maintenance request needs attention",
+          `${stringValue(nested(request, "unit", "unitNumber"), "Unit")} · ${stringValue(request.description, stringValue(request.category, "Open request"))}`,
+          "Maintenance",
+          unitId,
+        );
+      }
+      for (const inspection of propertyInspections) {
+        if (inspection.status !== "SCHEDULED") continue;
+        const unitId = stringValue(nested(inspection, "unit", "id"), "");
+        addAttention(
+          `inspection-${stringValue(inspection.id)}`,
+          "Inspection due",
+          `Unit ${stringValue(nested(inspection, "unit", "unitNumber"), "—")} · ${dateLabel(inspection.inspectedAt)}`,
+          "Inspections",
+          unitId,
+        );
+      }
+      for (const tenancy of activeTenancies) {
+        if (moveInInspectedTenancies.has(stringValue(tenancy.id, ""))) continue;
+        const unitId = stringValue(nested(tenancy, "unit", "id"), "");
+        addAttention(
+          `move-in-inspection-${stringValue(tenancy.id)}`,
+          "Move-in inspection required",
+          `${stringValue(nested(tenancy, "tenant", "legalName"), "Tenant")} · Unit ${stringValue(nested(tenancy, "unit", "unitNumber"), "—")}`,
+          "Inspections",
+          unitId,
+        );
+      }
+      for (const lease of propertyLeases) {
+        const endDate = stringValue(lease.endDate, "").slice(0, 10);
+        const startDate = stringValue(lease.startDate, "").slice(0, 10);
+        if (
+          lease.status !== "ACTIVE" ||
+          startDate > today ||
+          endDate < today ||
+          endDate > soon
+        ) continue;
+        addAttention(
+          `lease-expiring-${stringValue(lease.id)}`,
+          "Lease expires soon",
+          `${stringValue(nested(lease, "tenancy", "tenant", "legalName"), "Tenant")} · ${dateLabel(lease.endDate)}`,
+          "Leases",
+          leaseUnitId(lease),
+        );
+      }
+      const unreadAttentionItems = attentionItems.filter(
+        (item) => !attentionReadIds.has(item.id),
+      );
+      const attention = unreadAttentionItems.length;
+
+      return {
+        property,
+        propertyId,
+        leases: propertyLeases,
+        activeLeaseCount: propertyLeases.filter(
+          (lease) =>
+            lease.status === "ACTIVE" &&
+            stringValue(lease.startDate, "").slice(0, 10) <= today &&
+            stringValue(lease.endDate, "").slice(0, 10) >= today,
+        ).length,
+        pendingLeaseCount: propertyLeases.filter((lease) =>
+          ["DRAFT", "PENDING_TENANT_REVIEW", "CHANGES_REQUESTED", "TENANT_ACCEPTED", "TENANT_DECLINED"].includes(
+            stringValue(lease.status, ""),
+          ),
+        ).length,
+        inspectionRows: propertyInspections,
+        scheduledInspectionCount: propertyInspections.filter(
+          (inspection) => inspection.status === "SCHEDULED",
+        ).length,
+        completedInspectionCount: propertyInspections.filter(
+          (inspection) => inspection.status === "COMPLETED",
+        ).length,
+        utilityBillCount: propertyUtilityBills.length,
+        rentStatus,
+        missingLeaseTenancies,
+        units: propertyUnits.length,
+        occupied,
+        vacant,
+        occupancy: propertyUnits.length ? Math.round((occupied / propertyUnits.length) * 100) : 0,
+        tenants: activeTenantIds.size,
+        expected,
+        collected,
+        outstanding,
+        expenses,
+        overdue,
+        openMaintenance,
+        expiredLeases,
+        expiringLeases,
+        missingInspections,
+        attention,
+        attentionItems: unreadAttentionItems,
+      };
+      });
+  }, [properties, units, tenancies, charges, data, expensePeriod, portfolioPropertyId, attentionReadIds]);
+  const filteredPropertyRows = useMemo(() => {
+    const query = propertySearch.trim().toLowerCase();
+    return portfolioRows.filter((row) => {
+      const property = row.property;
+      const propertyNameAndAddress =
+        `${stringValue(property.name, "")} ${stringValue(property.address, "")}`
+          .toLowerCase();
+      const propertyMatchesQuery = !query || propertyNameAndAddress.includes(query);
+      const unitOrTenantMatchesQuery =
+        Boolean(query) &&
+        units.some((unit) => {
+          if (
+            propertyIdFrom(unit) !== row.propertyId ||
+            unit.status === "ARCHIVED"
+          ) {
+            return false;
+          }
+          const unitId = stringValue(unit.id, "");
+          const unitTenants = tenancies
+            .filter(
+              (tenancy) =>
+                stringValue(nested(tenancy, "unit", "id"), "") === unitId,
+            )
+            .map((tenancy) => stringValue(nested(tenancy, "tenant", "legalName"), ""));
+          return `${stringValue(unit.unitNumber, "")} ${unitTenants.join(" ")}`
+            .toLowerCase()
+            .includes(query);
+        });
+      const matchesSearch =
+        propertyMatchesQuery || unitOrTenantMatchesQuery;
+      const matchesType =
+        propertyTypeFilter === "all" || property.type === propertyTypeFilter;
+      const matchesOccupancy =
+        occupancyFilter === "all" ||
+        (occupancyFilter === "occupied" ? row.occupied > 0 : row.vacant > 0);
+      const matchesStatus =
+        propertyStatusFilter === "all" || property.status === propertyStatusFilter;
+      const matchesQuickFilter =
+        propertyQuickFilter === "all" ||
+        (propertyQuickFilter === "outstanding" &&
+          (row.outstanding > BigInt(0) ||
+            ["OVERDUE", "PARTIAL", "UNPAID"].includes(row.rentStatus))) ||
+        (propertyQuickFilter === "vacant" && row.vacant > 0) ||
+        (propertyQuickFilter === "expiring" && row.expiringLeases > 0);
+      return (
+        matchesSearch &&
+        matchesType &&
+        matchesOccupancy &&
+        matchesStatus &&
+        matchesQuickFilter
+      );
+    });
+  }, [
+    portfolioRows,
+    propertySearch,
+    propertyTypeFilter,
+    occupancyFilter,
+    propertyStatusFilter,
+    propertyQuickFilter,
+    units,
+    tenancies,
+  ]);
+  const pageSize = 10;
+  const pageCount = Math.max(1, Math.ceil(filteredPropertyRows.length / pageSize));
+  const visiblePropertyRows = filteredPropertyRows.slice(
+    (propertyPage - 1) * pageSize,
+    propertyPage * pageSize,
+  );
+  const portfolioTotals = portfolioRows.reduce(
+    (totals, row) => ({
+      units: totals.units + row.units,
+      occupied: totals.occupied + row.occupied,
+      expected: totals.expected + row.expected,
+      collected: totals.collected + row.collected,
+      outstanding: totals.outstanding + row.outstanding,
+      maintenance: totals.maintenance + row.openMaintenance,
+      expiring: totals.expiring + row.expiringLeases,
+    }),
+    {
+      units: 0,
+      occupied: 0,
+      expected: BigInt(0),
+      collected: BigInt(0),
+      outstanding: BigInt(0),
+      maintenance: 0,
+      expiring: 0,
+    },
+  );
+  const occupancyRate = portfolioTotals.units
+    ? Math.round((portfolioTotals.occupied / portfolioTotals.units) * 100)
+    : 0;
+  const collectionRate = portfolioTotals.expected > BigInt(0)
+    ? Math.min(
+        100,
+        Number((portfolioTotals.collected * BigInt(100)) / portfolioTotals.expected),
+      )
+    : 100;
+  const visibleMultiUnitIds = visiblePropertyRows
+    .filter((row) => row.units > 1)
+    .map((row) => row.propertyId);
+  const allVisibleMultiUnitsExpanded =
+    visibleMultiUnitIds.length > 0 &&
+    visibleMultiUnitIds.every((propertyId) => expandedPropertyIds[propertyId]);
+
+  useEffect(() => {
+    if (propertyPage > pageCount) setPropertyPage(pageCount);
+  }, [pageCount, propertyPage]);
 
   const fields: Field[] = useMemo(() => {
+    const amountStep = currency === "RWF" ? "1" : "0.01";
     const propertyOptions = selectOptions(properties, (row) => stringValue(row.name));
     const propertyOwnerOptions = selectOptions(
       rowsFor(data, "propertyOwners"),
@@ -415,7 +1353,14 @@ export function LandlordSectionWorkspace({
       (row) =>
         `${stringValue(nested(row, "property", "name"))} · ${stringValue(row.unitNumber)}`,
     );
-    const tenantOptions = selectOptions(tenants, (row) => stringValue(row.legalName));
+    const tenantChoices = Array.from(
+      new Map(
+        [...tenants, ...createdTenants]
+          .filter((tenant) => typeof tenant.id === "string")
+          .map((tenant) => [stringValue(tenant.id, ""), tenant] as const),
+      ).values(),
+    );
+    const tenantOptions = selectOptions(tenantChoices, (row) => stringValue(row.legalName));
     const leaseTenancies = tenancies.filter(
       (row) =>
         (row.status === "ACTIVE" || row.status === "UPCOMING") &&
@@ -434,13 +1379,13 @@ export function LandlordSectionWorkspace({
       `${stringValue(nested(row, "tenant", "legalName"))} · ${stringValue(row.status).replaceAll("_", " ")} · ${dateLabel(row.moveInDate)}`,
     );
     const chargeOptions = selectOptions(
-      charges.filter(
-        (charge) =>
-          !form.tenantId ||
-          nested(charge, "tenancy", "tenant", "id") === form.tenantId,
+      charges.filter((charge) =>
+        charge.status !== "VOID" &&
+        amountMinorUnits(charge.balance) > BigInt(0) &&
+        (!form.tenantId || nested(charge, "tenancy", "tenant", "id") === form.tenantId),
       ),
       (row) =>
-        `${stringValue(nested(row, "tenancy", "tenant", "legalName"))} · ${stringValue(row.period)} · balance ${stringValue(row.balance)}`,
+        `${stringValue(nested(row, "tenancy", "tenant", "legalName"))} · ${stringValue(row.period)} · balance ${formatAmount(row.balance, currency)}`,
     );
     switch (section) {
       case "Properties":
@@ -477,11 +1422,11 @@ export function LandlordSectionWorkspace({
           { name: "propertyId", label: "Property", required: true, options: propertyOptions },
           { name: "unitNumber", label: "Unit number", required: true },
           { name: "floor", label: "Floor" },
-          { name: "bedrooms", label: "Bedrooms", type: "number" },
-          { name: "bathrooms", label: "Bathrooms", type: "number" },
+          { name: "bedrooms", label: "Bedrooms", type: "number", step: "1" },
+          { name: "bathrooms", label: "Bathrooms", type: "number", step: "1" },
           { name: "sizeSqm", label: "Area (m²)", type: "number" },
-          { name: "rentAmount", label: `Monthly rent (${currency})`, type: "number", required: true },
-          { name: "depositAmount", label: `Required deposit (${currency})`, type: "number", required: true },
+          { name: "rentAmount", label: `Monthly rent (${currency})`, type: "number", step: amountStep, required: true },
+          { name: "depositAmount", label: `Required deposit (${currency})`, type: "number", step: amountStep, required: true },
           { name: "utilityArrangement", label: "Utility arrangement" },
           { name: "status", label: "Availability", options: [
             { value: "AVAILABLE", label: "Available" },
@@ -517,8 +1462,8 @@ export function LandlordSectionWorkspace({
           },
           { name: "startDate", label: "Start date", type: "date", required: true },
           { name: "endDate", label: "End date", type: "date", required: true },
-          { name: "rentAmount", label: `Monthly rent (${currency})`, type: "number", required: true },
-          { name: "dueDay", label: "Rent due day (1–28)", type: "number", required: true },
+          { name: "rentAmount", label: `Monthly rent (${currency})`, type: "number", step: amountStep, required: true },
+          { name: "dueDay", label: "Rent due day (1–28)", type: "number", step: "1", required: true },
           { name: "status", label: "Status", options: [
             { value: "DRAFT", label: "Draft" },
             { value: "ACTIVE", label: "Active (signed)" },
@@ -558,24 +1503,24 @@ export function LandlordSectionWorkspace({
             { name: "tenancyId", label: "Tenancy", required: true, options: tenancyOptions },
             { name: "period", label: "Rent period (YYYY-MM)", required: true, placeholder: "2026-11" },
             { name: "dueDate", label: "Due date", type: "date", required: true },
-            { name: "amount", label: `Rent charge (${currency})`, type: "number", required: true },
+            { name: "amount", label: `Rent charge (${currency})`, type: "number", step: amountStep, required: true },
           ];
         }
         if (rentMode === "payments") {
           return [
             { name: "tenantId", label: "Tenant", required: true, options: tenantOptions },
-            { name: "amount", label: `Amount received (${currency})`, type: "number", required: true },
+            { name: "amount", label: `Amount received (${currency})`, type: "number", step: amountStep, required: true },
             { name: "method", label: "Payment method", required: true, options: [
               { value: "CASH", label: "Cash" },
               { value: "BANK_TRANSFER", label: "Bank transfer" },
-              { value: "MOBILE_MONEY", label: "Mobile Money" },
-              { value: "CARD", label: "Card" },
+              { value: "MTN_MOMO", label: "MTN MoMo" },
+              { value: "AIRTEL_MONEY", label: "Airtel Money" },
               { value: "OTHER", label: "Other" },
             ] },
             { name: "reference", label: "Reference (optional)" },
             { name: "receivedAt", label: "Date received", type: "date", required: true },
             { name: "rentChargeId", label: "Allocate to rent charge (optional)", options: chargeOptions },
-            { name: "allocationAmount", label: `Allocation amount (${currency})`, type: "number" },
+            { name: "allocationAmount", label: `Allocation amount (${currency})`, type: "number", step: amountStep },
           ];
         }
         return [
@@ -588,7 +1533,7 @@ export function LandlordSectionWorkspace({
             { value: "DEDUCTION", label: "Deduction" },
             { value: "ADJUSTMENT", label: "Adjustment" },
           ] },
-          { name: "amount", label: `Amount (${currency})`, type: "number", required: true },
+          { name: "amount", label: `Amount (${currency})`, type: "number", step: amountStep, required: true },
           { name: "date", label: "Date", type: "date", required: true },
           { name: "reason", label: "Reason", required: true },
         ];
@@ -596,7 +1541,7 @@ export function LandlordSectionWorkspace({
         return [
           { name: "propertyId", label: "Property", required: true, options: propertyOptions },
           { name: "category", label: "Category", required: true, placeholder: "Repairs, insurance, tax..." },
-          { name: "amount", label: `Amount (${currency})`, type: "number", required: true },
+          { name: "amount", label: `Amount (${currency})`, type: "number", step: amountStep, required: true },
           { name: "date", label: "Date", type: "date", required: true },
           { name: "supplier", label: "Supplier" },
           uploadFileField("Receipt or evidence (optional)"),
@@ -606,7 +1551,7 @@ export function LandlordSectionWorkspace({
           { name: "propertyId", label: "Property", required: true, options: propertyOptions },
           { name: "utilityType", label: "Utility", required: true, placeholder: "Water, electricity..." },
           { name: "period", label: "Billing period (YYYY-MM)", required: true, placeholder: "2026-11" },
-          { name: "totalAmount", label: `Total bill (${currency})`, type: "number", required: true },
+          { name: "totalAmount", label: `Total bill (${currency})`, type: "number", step: amountStep, required: true },
           { name: "unitIds", label: "Allocate across units", type: "multi", options: units
             .filter((unit) => !form.propertyId || nested(unit, "property", "id") === form.propertyId)
             .map((unit) => ({ value: stringValue(unit.id, ""), label: stringValue(unit.unitNumber) })) },
@@ -666,7 +1611,27 @@ export function LandlordSectionWorkspace({
       default:
         return [];
     }
-  }, [section, properties, units, tenants, tenancies, charges, deposits, currency, rentMode, tenantMode, propertyView, data, form, role]);
+  }, [section, properties, units, tenants, createdTenants, tenancies, charges, deposits, currency, rentMode, tenantMode, propertyView, data, form, role]);
+  const isRentPaymentDialog = section === "Rent & Deposits" && rentMode === "payments" && !editingId;
+  const isPropertyEditDrawer =
+    formOpen && section === "Properties" && propertyView === "properties" && editingId !== null;
+  const paymentReviewCharge = charges.find(
+    (charge) => stringValue(charge.id, "") === form.rentChargeId,
+  );
+  const paymentReviewAmount = paymentReviewStep === 1 ? amountMinorUnits(form.amount) : BigInt(0);
+  const paymentReviewOpenBalance = paymentReviewCharge
+    ? amountMinorUnits(paymentReviewCharge.balance)
+    : BigInt(0);
+  const paymentReviewAllocation = paymentReviewStep === 1 && form.allocationAmount
+    ? amountMinorUnits(form.allocationAmount)
+    : BigInt(0);
+  const paymentReviewRemaining = paymentReviewOpenBalance > paymentReviewAllocation
+    ? paymentReviewOpenBalance - paymentReviewAllocation
+    : BigInt(0);
+  const paymentReviewAdvance = paymentReviewAmount - paymentReviewAllocation;
+  const paymentChannelLabel = fields
+    .find((field) => field.name === "method")
+    ?.options?.find((option) => option.value === form.method)?.label ?? form.method;
 
   function updateField(name: string, value: string) {
     if (section === "Inspections" && name === "unitId") {
@@ -680,6 +1645,26 @@ export function LandlordSectionWorkspace({
       }));
       return;
     }
+    if (
+      section === "Rent & Deposits" &&
+      rentMode === "payments" &&
+      (name === "amount" || name === "rentChargeId")
+    ) {
+      const chargeId = name === "rentChargeId" ? value : form.rentChargeId;
+      const amountValue = name === "amount" ? value : form.amount;
+      const paymentAmount = tryAmountMinorUnits(amountValue ?? "");
+      const selectedCharge = charges.find((charge) => stringValue(charge.id, "") === chargeId);
+      const chargeBalance = selectedCharge ? amountMinorUnits(selectedCharge.balance) : BigInt(0);
+      const allocation = paymentAmount === null
+        ? ""
+        : minorUnitsInput(paymentAmount < chargeBalance ? paymentAmount : chargeBalance, currency);
+      setForm((current) => ({
+        ...current,
+        [name]: value,
+        allocationAmount: allocation,
+      }));
+      return;
+    }
     setForm((current) => ({
       ...current,
       [name]: value,
@@ -687,9 +1672,70 @@ export function LandlordSectionWorkspace({
     }));
   }
 
-  function openForm() {
+  function openForm(initialValues: Record<string, string> = {}) {
     setEditingId(null);
-    setForm({});
+    const today = new Date().toISOString().slice(0, 10);
+    const selectedUnit = units.find(
+      (unit) => stringValue(unit.id, "") === unitFilterId,
+    );
+    const selectedTenancy = tenancies.find(
+      (tenancy) =>
+        stringValue(nested(tenancy, "unit", "id"), "") === unitFilterId &&
+        ["ACTIVE", "UPCOMING"].includes(stringValue(tenancy.status, "")),
+    );
+    const defaults: Record<string, string> = {};
+    if (propertyFilterId && ["Units", "Expenses", "Utilities"].includes(section)) {
+      defaults.propertyId = propertyFilterId;
+    }
+    if (section === "Utilities" && propertyFilterId) {
+      defaults.unitIds = units
+        .filter((unit) => propertyIdFrom(unit) === propertyFilterId)
+        .map((unit) => stringValue(unit.id, ""))
+        .filter(Boolean)
+        .join(",");
+    }
+    if (section === "Tenants" && tenantMode === "tenancies") {
+      if (selectedUnit?.status === "AVAILABLE" && unitFilterId) defaults.unitId = unitFilterId;
+      defaults.moveInDate = today;
+    }
+    if (section === "Inspections") {
+      if (unitFilterId) defaults.unitId = unitFilterId;
+      defaults.inspectedAt = today;
+    }
+    if (section === "Maintenance" && unitFilterId) {
+      defaults.unitId = unitFilterId;
+      const activeTenancy = tenancies.find(
+        (tenancy) =>
+          stringValue(nested(tenancy, "unit", "id"), "") === unitFilterId &&
+          tenancy.status === "ACTIVE",
+      );
+      if (activeTenancy) defaults.tenantId = stringValue(nested(activeTenancy, "tenant", "id"), "");
+    }
+    if (section === "Leases" && selectedTenancy) {
+      defaults.tenantId = stringValue(nested(selectedTenancy, "tenant", "id"), "");
+      defaults.tenancyId = stringValue(selectedTenancy.id, "");
+    }
+    if (section === "Notices" && selectedTenancy) {
+      defaults.tenancyId = stringValue(selectedTenancy.id, "");
+      defaults.issueDate = today;
+    }
+    if (section === "Rent & Deposits" && selectedTenancy) {
+      if (rentMode === "charges") defaults.tenancyId = stringValue(selectedTenancy.id, "");
+      if (rentMode === "payments") {
+        defaults.tenantId = stringValue(nested(selectedTenancy, "tenant", "id"), "");
+        defaults.receivedAt = today;
+        const openCharge = charges
+          .filter((charge) =>
+            nested(charge, "tenancy", "id") === selectedTenancy.id &&
+            charge.status !== "VOID" &&
+            amountMinorUnits(charge.balance) > BigInt(0),
+          )
+          .sort((left, right) => stringValue(left.dueDate, "").localeCompare(stringValue(right.dueDate, "")))[0];
+        if (openCharge) defaults.rentChargeId = stringValue(openCharge.id, "");
+      }
+    }
+    setForm({ ...defaults, ...initialValues });
+    setPaymentReviewStep(0);
     setSelectedFile(null);
     setError(null);
     setSuccess(null);
@@ -699,6 +1745,7 @@ export function LandlordSectionWorkspace({
   function closeForm() {
     if (saving) return;
     setFormOpen(false);
+    setPaymentReviewStep(0);
     setEditingId(null);
     setForm({});
     setSelectedFile(null);
@@ -835,6 +1882,43 @@ export function LandlordSectionWorkspace({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (
+      section === "Rent & Deposits" &&
+      rentMode === "payments" &&
+      !editingId &&
+      paymentReviewStep === 0
+    ) {
+      const receivedAmount = tryAmountMinorUnits(form.amount ?? "");
+      if (!form.tenantId || !form.method || !form.receivedAt || receivedAmount === null || receivedAmount <= BigInt(0)) {
+        setError("Enter a tenant, positive amount, payment channel and received date.");
+        return;
+      }
+      if (currency === "RWF" && receivedAmount % BigInt(100) !== BigInt(0)) {
+        setError("RWF payments must be entered as whole francs.");
+        return;
+      }
+      if (form.allocationAmount) {
+        const allocationAmount = tryAmountMinorUnits(form.allocationAmount);
+        const selectedCharge = charges.find((charge) => stringValue(charge.id, "") === form.rentChargeId);
+        if (
+          allocationAmount === null ||
+          allocationAmount <= BigInt(0) ||
+          allocationAmount > receivedAmount ||
+          !selectedCharge ||
+          allocationAmount > amountMinorUnits(selectedCharge.balance)
+        ) {
+          setError("The allocation must be positive and cannot exceed the payment or open charge balance.");
+          return;
+        }
+        if (currency === "RWF" && allocationAmount % BigInt(100) !== BigInt(0)) {
+          setError("RWF allocations must be entered as whole francs.");
+          return;
+        }
+      }
+      setError(null);
+      setPaymentReviewStep(1);
+      return;
+    }
     setSaving(true);
     setError(null);
     setSuccess(null);
@@ -928,7 +2012,7 @@ export function LandlordSectionWorkspace({
                   ? [{ rentChargeId: form.rentChargeId, amount: form.allocationAmount }]
                   : [],
             };
-            label = "Manual payment recorded";
+            label = "User-recorded rent payment saved";
           } else {
             path = `rent/deposits/${form.depositId}/transactions`;
             payload = { type: form.type, amount: form.amount, date: form.date, reason: form.reason };
@@ -946,25 +2030,27 @@ export function LandlordSectionWorkspace({
           if (selectedUnitIds.length === 0) {
             throw new Error("Choose at least one unit to allocate the utility bill.");
           }
-          const [wholeAmount, fractionAmount = ""] = form.totalAmount.split(".");
-          const totalCents =
-            Number.parseInt(wholeAmount, 10) * 100 +
-            Number.parseInt(fractionAmount.padEnd(2, "0").slice(0, 2) || "0", 10);
-          if (!Number.isSafeInteger(totalCents) || totalCents <= 0) {
+          const parsedTotal = tryAmountMinorUnits(form.totalAmount);
+          if (parsedTotal === null || parsedTotal <= BigInt(0)) {
             throw new Error("Enter a valid utility bill total.");
           }
-          const baseCents = Math.floor(totalCents / selectedUnitIds.length);
-          const remainder = totalCents % selectedUnitIds.length;
+          if (currency === "RWF" && parsedTotal % BigInt(100) !== BigInt(0)) {
+            throw new Error("RWF utility bills must be entered as whole francs.");
+          }
+          const totalUnits = currency === "RWF" ? parsedTotal / BigInt(100) : parsedTotal;
+          const divisor = BigInt(selectedUnitIds.length);
+          const baseUnits = totalUnits / divisor;
+          const remainder = totalUnits % divisor;
           payload = {
             propertyId: form.propertyId,
             utilityType: form.utilityType,
             period: form.period,
             totalAmount: form.totalAmount,
             allocations: selectedUnitIds.map((unitId, index) => {
-              const shareCents = baseCents + (index < remainder ? 1 : 0);
+              const share = baseUnits + (BigInt(index) < remainder ? BigInt(1) : BigInt(0));
               return {
                 unitId,
-                amount: `${Math.floor(shareCents / 100)}.${String(shareCents % 100).padStart(2, "0")}`,
+                amount: currency === "RWF" ? share.toString() : minorUnitsInput(share, currency),
                 calculationMethod: form.calculationMethod,
               };
             }),
@@ -1043,6 +2129,18 @@ export function LandlordSectionWorkspace({
                           : section === "Notices" ? "notice" : "";
       const created = record(result[resultKey]);
       if (typeof created.id === "string") routeId = created.id;
+      if (
+        section === "Tenants" &&
+        tenantMode === "tenants" &&
+        !editingId &&
+        typeof created.id === "string"
+      ) {
+        setCreatedTenants((current) =>
+          current.some((tenant) => tenant.id === created.id)
+            ? current
+            : [...current, created],
+        );
+      }
 
       if (selectedFile && section === "Leases" && routeId) {
         await uploadAndLink(selectedFile, `leases/${routeId}/documents`, {
@@ -1066,8 +2164,12 @@ export function LandlordSectionWorkspace({
       setEditingId(null);
       setSelectedFile(null);
       setFormOpen(false);
+      setPaymentReviewStep(0);
       setRefreshKey((key) => key + 1);
       onUpdated();
+      if (section === "Rent & Deposits" && rentMode === "payments" && routeId) {
+        void downloadReceipt(routeId);
+      }
     } catch (requestError) {
       setError(
         requestError instanceof TypeError
@@ -1371,23 +2473,175 @@ export function LandlordSectionWorkspace({
                     : section === "Notices" ? "Create notice" : `Add ${sectionItemName}`;
   const formTitle = editingId ? `Edit ${sectionItemName}` : formActionLabel;
   const FormIcon = sectionIcons[section];
+  const portfolioToday = new Date().toISOString().slice(0, 10);
+  const currentRentPeriod = portfolioToday.slice(0, 7);
+  const leaseExpiringCutoff = new Date(
+    Date.now() + 60 * 24 * 60 * 60 * 1000,
+  )
+    .toISOString()
+    .slice(0, 10);
+  function getUnitLedgerDetails(unit: ValueRecord): UnitLedgerDetails {
+    const unitId = stringValue(unit.id, "");
+    const unitTenancies = tenancies.filter(
+      (tenancy) => stringValue(nested(tenancy, "unit", "id"), "") === unitId,
+    );
+    const activeTenancy =
+      unitTenancies.find((tenancy) => tenancy.status === "ACTIVE") ?? null;
+    const upcomingTenancy =
+      unitTenancies.find((tenancy) => tenancy.status === "UPCOMING") ?? null;
+    const tenancy = activeTenancy ?? upcomingTenancy;
+    const tenancyId = stringValue(tenancy?.id, "");
+    const unitLeases = leases.filter(
+      (lease) =>
+        stringValue(nested(lease, "tenancy", "id"), "") === tenancyId,
+    );
+    const activeLease = unitLeases.find(
+      (lease) =>
+        lease.status === "ACTIVE" &&
+        stringValue(lease.startDate, "").slice(0, 10) <= portfolioToday &&
+        stringValue(lease.endDate, "").slice(0, 10) >= portfolioToday,
+    );
+    const relevantLease =
+      activeLease ??
+      unitLeases.find((lease) =>
+        [
+          "PENDING_TENANT_REVIEW",
+          "CHANGES_REQUESTED",
+          "TENANT_ACCEPTED",
+          "TENANT_DECLINED",
+          "DRAFT",
+        ].includes(stringValue(lease.status, "")),
+      );
+    const currentCharges = charges.filter(
+      (charge) =>
+        stringValue(nested(charge, "tenancy", "id"), "") === tenancyId &&
+        stringValue(charge.period, "") === currentRentPeriod &&
+        charge.status !== "VOID",
+    );
+    const balance = currentCharges.reduce(
+      (sum, charge) => sum + amountMinorUnits(charge.balance),
+      BigInt(0),
+    );
+    const paidAmount = currentCharges.reduce(
+      (sum, charge) => {
+        const paid = amountMinorUnits(charge.amount) - amountMinorUnits(charge.balance);
+        return sum + (paid > BigInt(0) ? paid : BigInt(0));
+      },
+      BigInt(0),
+    );
+    const hasOverdueCharge = currentCharges.some(
+      (charge) =>
+        amountMinorUnits(charge.balance) > BigInt(0) &&
+        (charge.status === "OVERDUE" ||
+          stringValue(charge.dueDate, "").slice(0, 10) < portfolioToday),
+    );
+    const rentStatus: PortfolioRow["rentStatus"] = !activeTenancy
+      ? "NO_TENANTS"
+      : currentCharges.length === 0
+        ? "NOT_CHARGED"
+        : balance <= BigInt(0)
+          ? "PAID"
+          : hasOverdueCharge
+            ? "OVERDUE"
+            : paidAmount > BigInt(0)
+              ? "PARTIAL"
+              : "UNPAID";
+    const deposit = deposits.find(
+      (item) =>
+        stringValue(nested(item, "tenancy", "id"), "") === tenancyId,
+    );
+    const openMaintenance = rowsFor(data, "requests").filter(
+      (request) =>
+        stringValue(nested(request, "unit", "id"), "") === unitId &&
+        !["COMPLETED", "REJECTED"].includes(stringValue(request.status, "")),
+    );
+    const leaseEndDate = stringValue(relevantLease?.endDate, "");
 
+    return {
+      unit,
+      unitId,
+      tenancy,
+      activeTenancy,
+      upcomingTenancy,
+      occupied: Boolean(activeTenancy) || unit.status === "OCCUPIED",
+      vacant:
+        unit.status === "AVAILABLE" &&
+        !activeTenancy &&
+        !upcomingTenancy,
+      tenantName: stringValue(nested(tenancy, "tenant", "legalName"), ""),
+      tenantPhone: stringValue(nested(tenancy, "tenant", "phone"), ""),
+      leaseStatus: stringValue(relevantLease?.status, ""),
+      leaseEndDate,
+      expiring:
+        Boolean(activeLease) &&
+        Boolean(leaseEndDate) &&
+        leaseEndDate.slice(0, 10) >= portfolioToday &&
+        leaseEndDate.slice(0, 10) <= leaseExpiringCutoff,
+      rentAmount: amountMinorUnits(
+        activeLease?.rentAmount ??
+          unitLeases.find((lease) => lease.status === "TENANT_ACCEPTED")?.rentAmount ??
+          unit.rentAmount,
+      ),
+      balance,
+      rentStatus,
+      depositHeld: amountMinorUnits(deposit?.heldBalance ?? deposit?.receivedAmount),
+      depositRequired: amountMinorUnits(deposit?.requiredAmount),
+      openMaintenance,
+    };
+  }
+  const actionProperty = propertyAction
+    ? properties.find((property) => stringValue(property.id, "") === propertyAction.propertyId) ?? null
+    : null;
+  const actionUnit = propertyAction && "unitId" in propertyAction
+    ? units.find((unit) => stringValue(unit.id, "") === propertyAction.unitId) ?? null
+    : null;
+  const actionUnitDetails = actionUnit ? getUnitLedgerDetails(actionUnit) : null;
+  const actionAttentionItems = propertyAction
+    ? portfolioRows
+        .find((row) => row.propertyId === propertyAction.propertyId)
+        ?.attentionItems.filter((item) =>
+          !("unitId" in propertyAction) || item.unitId === propertyAction.unitId,
+        ) ?? []
+    : [];
   return (
-    <div className="landlord-section">
+    <div className={`landlord-section${section === "Properties" ? " is-properties-section" : ""}`}>
+      {(section !== "Properties" || propertyView === "owners") && (
       <div className="dashboard-heading-row">
         <div>
-          <span className="dashboard-date">PROPEASE WORKSPACE</span>
+          <span className="dashboard-date">
+            PROPEASE WORKSPACE
+          </span>
           <h1>{title}</h1>
+          {section === "Properties" && (
+            <p>
+              {role === "MAINTENANCE_STAFF"
+                ? "Review and update your assigned property maintenance requests."
+                : "Manage your properties, units, tenants and financial performance."}
+            </p>
+          )}
         </div>
-        <button
-          className="dashboard-secondary-button"
-          type="button"
-          onClick={() => setRefreshKey((key) => key + 1)}
-          disabled={loading}
-        >
-          <RefreshCw size={15} /> Refresh
-        </button>
+        <div className="properties-heading-actions">
+          {section === "Properties" && canCreateCurrentRecord && (
+            <button
+              className="dashboard-primary-button landlord-add-record-button"
+              ref={addButtonRef}
+              type="button"
+              onClick={() => setPropertySetupOpen(true)}
+            >
+              <Plus size={16} /> {propertyView === "owners" ? "Add property owner" : "Add Property"}
+            </button>
+          )}
+          <button
+            className="dashboard-secondary-button"
+            type="button"
+            onClick={() => setRefreshKey((key) => key + 1)}
+            disabled={loading}
+          >
+            <RefreshCw size={15} /> Refresh
+          </button>
+        </div>
       </div>
+      )}
 
       {loadError && <div className="landlord-alert is-error" role="alert">{loadError}</div>}
       {(error || success) && (
@@ -1466,7 +2720,822 @@ export function LandlordSectionWorkspace({
       )}
 
       {loading ? (
-        <WorkspaceContentSkeleton section={section} />
+        <WorkspaceContentSkeleton section={section} unitDetailsOnly={unitDetailsOnly} />
+      ) : section === "Properties" ? (
+        role === "MAINTENANCE_STAFF" ? (
+          <section className="landlord-panel landlord-records-panel">
+            <div className="landlord-panel-heading">
+              <div>
+                <h2>Assigned maintenance requests</h2>
+                <p>Review and update requests assigned to you.</p>
+              </div>
+            </div>
+            <MaintenanceList
+              rows={rowsFor(data, "requests")}
+              members={[]}
+              onUpdate={updateMaintenance}
+              requestText={requestText}
+              role={role}
+            />
+            {!rowsFor(data, "requests").length && (
+              <p className="landlord-empty-state">No maintenance requests are assigned to you.</p>
+            )}
+          </section>
+        ) : propertyView === "owners" ? (
+          <section className="landlord-panel landlord-records-panel">
+            <div className="landlord-panel-heading">
+              <div><h2>Property owners</h2></div>
+            </div>
+            <PropertyOwnerList
+              rows={rowsFor(data, "propertyOwners")}
+              onEdit={canManagePropertyOwners ? editRecord : undefined}
+            />
+          </section>
+        ) : (
+          <div className="properties-dashboard properties-reference-dashboard">
+            <section className="property-portfolio-overview" aria-labelledby="property-portfolio-overview-title">
+              <div className="property-portfolio-overview-heading">
+                <div>
+                  <h2 id="property-portfolio-overview-title">Portfolio Overview</h2>
+                  <p>
+                    {new Intl.DateTimeFormat("en", {
+                      month: "long",
+                      year: "numeric",
+                    }).format(new Date())} Billing Cycle · All amounts in Rwandan Francs ({currency})
+                  </p>
+                </div>
+                <div className="property-portfolio-header-controls">
+                  <label className="dashboard-portfolio-selector">
+                    <span className="sr-only">Select portfolio property</span>
+                    <select
+                      aria-label="Select portfolio property"
+                      value={portfolioPropertyId ?? ""}
+                      onChange={(event) => onPortfolioPropertyChange?.(event.target.value)}
+                    >
+                      <option value="">All Properties ({properties.length})</option>
+                      {properties.map((property) => (
+                        <option key={stringValue(property.id, "")} value={stringValue(property.id, "")}>{stringValue(property.name)}</option>
+                      ))}
+                    </select>
+                  </label>
+                  {canCreateProperties && (
+                    <button className="property-ledger-primary-action" type="button" onClick={() => setPropertySetupOpen(true)}>
+                      <Plus size={15} aria-hidden="true" /> Add Property
+                    </button>
+                  )}
+                  <button
+                    className="property-ledger-refresh-action"
+                    type="button"
+                    aria-label="Refresh portfolio"
+                    title="Refresh portfolio"
+                    onClick={() => setRefreshKey((key) => key + 1)}
+                  >
+                    <RefreshCw size={15} aria-hidden="true" />
+                  </button>
+                </div>
+              </div>
+              <div className="property-portfolio-kpis">
+                <article className="property-portfolio-kpi">
+                  <div className="property-portfolio-kpi-heading">
+                    <span>Portfolio Occupancy</span>
+                    <span className="property-portfolio-kpi-icon"><Home size={17} aria-hidden="true" /></span>
+                  </div>
+                  <strong>{occupancyRate}%</strong>
+                  <p>{portfolioTotals.occupied} of {portfolioTotals.units} units</p>
+                  <div className="property-portfolio-progress" aria-label={`${occupancyRate}% occupancy`}>
+                    <span style={{ width: `${occupancyRate}%` }} />
+                  </div>
+                </article>
+                <article className="property-portfolio-kpi">
+                  <div className="property-portfolio-kpi-heading">
+                    <span>Rent Collected</span>
+                    <span className="property-portfolio-kpi-icon is-positive"><Banknote size={17} aria-hidden="true" /></span>
+                  </div>
+                  <strong>{formatAmount(portfolioTotals.collected, currency)}</strong>
+                  <p>
+                    of {formatAmount(portfolioTotals.expected, currency)} expected
+                    <b>{collectionRate}%</b>
+                  </p>
+                  <div className="property-portfolio-progress is-positive" aria-label={`${collectionRate}% rent collected`}>
+                    <span style={{ width: `${collectionRate}%` }} />
+                  </div>
+                </article>
+                <article className="property-portfolio-kpi">
+                  <div className="property-portfolio-kpi-heading">
+                    <span>Outstanding Arrears</span>
+                    <span className="property-portfolio-kpi-icon is-warning"><CalendarDays size={17} aria-hidden="true" /></span>
+                  </div>
+                  <strong className="is-arrears">{formatAmount(portfolioTotals.outstanding, currency)}</strong>
+                  <p>
+                    {portfolioRows.filter((row) => row.outstanding > BigInt(0)).length} properties with a balance
+                    {portfolioTotals.outstanding > BigInt(0) && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPropertyQuickFilter("outstanding");
+                          setPropertyPage(1);
+                        }}
+                      >
+                        Filter
+                      </button>
+                    )}
+                  </p>
+                </article>
+                <article className="property-portfolio-kpi">
+                  <div className="property-portfolio-kpi-heading">
+                    <span>Ops &amp; Lease Alerts</span>
+                    <span className="property-portfolio-kpi-icon is-alert"><Wrench size={17} aria-hidden="true" /></span>
+                  </div>
+                  <strong className="property-ops-kpi-summary">
+                    {portfolioTotals.maintenance}<small> tickets</small><i aria-hidden="true">|</i>{portfolioTotals.expiring}<small> expiring</small>
+                  </strong>
+                  <p>
+                    Needs attention this month
+                  </p>
+                </article>
+              </div>
+            </section>
+            <section className="properties-table-panel">
+              <div className="properties-table-heading properties-ledger-heading">
+                <div>
+                  <h2>Properties &amp; Units Ledger <span className="properties-count-badge">{portfolioRows.length} {portfolioRows.length === 1 ? "Property" : "Properties"}</span></h2>
+                  <p>Single-unit homes appear directly as flat rows; multi-unit buildings show rolled-up totals when collapsed.</p>
+                </div>
+                <div className="properties-controls properties-reference-controls">
+                <div className="property-ledger-quick-filters" role="group" aria-label="Filter property ledger">
+                  {([
+                    ["all", "All"],
+                    ["outstanding", "Overdue / Partial"],
+                    ["vacant", "Vacant"],
+                    ["expiring", "Expiring Soon"],
+                  ] as const).map(([filter, label]) => (
+                    <button
+                      type="button"
+                      key={filter}
+                      className={propertyQuickFilter === filter ? "is-active" : ""}
+                      aria-pressed={propertyQuickFilter === filter}
+                      onClick={() => {
+                        setPropertyQuickFilter(filter);
+                        setPropertyPage(1);
+                      }}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <label className="properties-search">
+                  <Search size={16} aria-hidden="true" />
+                  <input
+                    type="search"
+                    value={propertySearch}
+                    onChange={(event) => {
+                      setPropertySearch(event.target.value);
+                      setPropertyPage(1);
+                    }}
+                    placeholder="Search property, unit, tenant"
+                    aria-label="Search property, unit, or tenant"
+                  />
+                </label>
+                {visibleMultiUnitIds.length > 0 && (
+                  <button
+                    type="button"
+                    className="property-ledger-expand-all"
+                    onClick={() =>
+                      setExpandedPropertyIds(
+                        allVisibleMultiUnitsExpanded
+                          ? {}
+                          : Object.fromEntries(
+                              visibleMultiUnitIds.map((propertyId) => [propertyId, true]),
+                            ),
+                      )
+                    }
+                  >
+                    {allVisibleMultiUnitsExpanded ? "Collapse all" : "Expand all"}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="properties-filter-toggle"
+                  aria-expanded={showAdditionalFilters}
+                  onClick={() => setShowAdditionalFilters((shown) => !shown)}
+                >
+                  <SlidersHorizontal size={14} /> Filters
+                </button>
+                {showAdditionalFilters && <div className="properties-extra-filters">
+                <label className="properties-filter properties-status-filter">
+                  <span>Property status</span>
+                  <select
+                    aria-label="Filter by property status"
+                    value={propertyStatusFilter}
+                    onChange={(event) => {
+                      setPropertyStatusFilter(event.target.value);
+                      setPropertyPage(1);
+                    }}
+                  >
+                    <option value="all">All statuses</option>
+                    {Array.from(new Set(properties.map((property) => stringValue(property.status, ""))))
+                      .filter(Boolean)
+                      .map((status) => <option value={status} key={status}>{status.replaceAll("_", " ")}</option>)}
+                  </select>
+                </label>
+                <label className="properties-filter">
+                  <span>Property type</span>
+                  <select
+                    value={propertyTypeFilter}
+                    onChange={(event) => {
+                      setPropertyTypeFilter(event.target.value);
+                      setPropertyPage(1);
+                    }}
+                  >
+                    <option value="all">All types</option>
+                    {Array.from(new Set(properties.map((property) => stringValue(property.type, ""))))
+                      .filter(Boolean)
+                      .map((type) => <option value={type} key={type}>{type.replaceAll("_", " ")}</option>)}
+                  </select>
+                </label>
+                <label className="properties-filter">
+                  <span>Occupancy</span>
+                  <select
+                    value={occupancyFilter}
+                    onChange={(event) => {
+                      setOccupancyFilter(event.target.value);
+                      setPropertyPage(1);
+                    }}
+                  >
+                    <option value="all">Any occupancy</option>
+                    <option value="occupied">Has occupied units</option>
+                    <option value="vacant">Has vacant units</option>
+                  </select>
+                </label>
+                <label className="properties-period-picker">
+                  <span>Reporting period</span>
+                  <input
+                    type="month"
+                    value={expensePeriod}
+                    onChange={(event) => {
+                      setExpensePeriod(event.target.value);
+                      setPropertyPage(1);
+                    }}
+                    aria-label="Reporting period"
+                  />
+                </label>
+                <button
+                  type="button"
+                  className="properties-reset-button"
+                  onClick={() => {
+                    setPropertySearch("");
+                    setPropertyTypeFilter("all");
+                    setOccupancyFilter("all");
+                    setPropertyStatusFilter("all");
+                    setPropertyQuickFilter("all");
+                    setExpensePeriod(new Date().toISOString().slice(0, 7));
+                    setPropertyPage(1);
+                  }}
+                >
+                  Reset filters
+                </button>
+                </div>}
+                </div>
+              </div>
+              <div className="properties-table-scroll">
+                <table className="properties-table property-ledger-table">
+                  <thead>
+                    <tr>
+                      <th>Property / Unit</th>
+                      <th>Tenant &amp; Lease</th>
+                      <th>Rent &amp; Balance ({currency})</th>
+                      <th>Deposit Held</th>
+                      <th>Maintenance &amp; Follow-up</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visiblePropertyRows.map((row) => {
+                      const property = row.property;
+                      const propertyId = row.propertyId;
+                      const query = propertySearch.trim().toLowerCase();
+                      const propertyMatchesQuery =
+                        !query ||
+                        `${stringValue(property.name, "")} ${stringValue(property.address, "")}`
+                          .toLowerCase()
+                          .includes(query);
+                      const propertyUnits = units.filter(
+                        (unit) =>
+                          propertyIdFrom(unit) === propertyId &&
+                          unit.status !== "ARCHIVED",
+                      );
+                      const unitSummaries = propertyUnits.map(getUnitLedgerDetails);
+                      const visibleUnitSummaries = unitSummaries.filter((unit) => {
+                        const matchesQuery =
+                          propertyMatchesQuery ||
+                          !query ||
+                          `${stringValue(unit.unit.unitNumber, "")} ${unit.tenantName}`
+                            .toLowerCase()
+                            .includes(query);
+                        const matchesQuickFilter =
+                          propertyQuickFilter === "all" ||
+                          (propertyQuickFilter === "outstanding" &&
+                            (unit.balance > BigInt(0) ||
+                              ["OVERDUE", "PARTIAL", "UNPAID"].includes(unit.rentStatus))) ||
+                          (propertyQuickFilter === "vacant" && unit.vacant) ||
+                          (propertyQuickFilter === "expiring" && unit.expiring);
+                        return matchesQuery && matchesQuickFilter;
+                      });
+                      const isMultiUnit = propertyUnits.length > 1;
+                      const isExpanded = Boolean(expandedPropertyIds[propertyId]);
+                      const occupiedUnits = unitSummaries.filter((unit) => unit.occupied).length;
+                      const vacantUnits = unitSummaries.filter((unit) => unit.vacant).length;
+                      const heldDeposit = unitSummaries.reduce(
+                        (sum, unit) => sum + unit.depositHeld,
+                        BigInt(0),
+                      );
+                      const primaryUnit = unitSummaries[0];
+                      const propertyOpenTickets = unitSummaries.flatMap((unit) =>
+                        unit.openMaintenance.map((ticket) => ({ ticket, unit })),
+                      );
+                      const rentStatusLabels: Record<PortfolioRow["rentStatus"], string> = {
+                        PAID: "Paid",
+                        PARTIAL: "Partial",
+                        UNPAID: "Unpaid",
+                        OVERDUE: "Overdue",
+                        NOT_CHARGED: "Not charged",
+                        NO_TENANTS: "No active rent",
+                      };
+                      const propertyRentStatusType = isMultiUnit
+                        ? row.rentStatus
+                        : primaryUnit?.rentStatus ?? row.rentStatus;
+                      const propertyRentStatusText = isMultiUnit
+                        ? row.outstanding > BigInt(0)
+                          ? `Balance ${formatAmount(row.outstanding, currency)}`
+                          : rentStatusLabels[row.rentStatus]
+                        : primaryUnit
+                          ? primaryUnit.balance > BigInt(0)
+                            ? `${rentStatusLabels[primaryUnit.rentStatus]} · ${formatAmount(primaryUnit.balance, currency)} due`
+                            : rentStatusLabels[primaryUnit.rentStatus]
+                          : rentStatusLabels[row.rentStatus];
+                      return (
+                        <Fragment key={propertyId}>
+                          <tr
+                            className={`property-ledger-property-row${isExpanded ? " is-expanded" : ""}`}
+                            key={propertyId}
+                          >
+                            <td className="properties-property-cell" data-label="Property / Unit">
+                              <div className="property-ledger-property-cell">
+                                {isMultiUnit ? (
+                                  <button
+                                    type="button"
+                                    className="property-ledger-expand-button"
+                                    aria-expanded={isExpanded}
+                                    aria-label={`${isExpanded ? "Collapse" : "Expand"} units for ${stringValue(property.name)}`}
+                                    onClick={() =>
+                                      setExpandedPropertyIds((current) => ({
+                                        ...current,
+                                        [propertyId]: !current[propertyId],
+                                      }))
+                                    }
+                                  >
+                                    {isExpanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                                  </button>
+                                ) : (
+                                  <span className="properties-property-icon"><Building2 size={17} /></span>
+                                )}
+                                <span className="properties-property-info">
+                                  <strong>{stringValue(property.name)}</strong>
+                                  <span>{stringValue(property.address)}</span>
+                                  <small>
+                                    {stringValue(property.type).replaceAll("_", " ")}
+                                    {isMultiUnit
+                                      ? ` · ${propertyUnits.length} units`
+                                      : primaryUnit
+                                        ? ` · Unit ${stringValue(primaryUnit.unit.unitNumber, "—")}`
+                                        : " · No units yet"}
+                                  </small>
+                                </span>
+                              </div>
+                            </td>
+                            <td data-label="Tenant & Lease">
+                              {isMultiUnit ? (
+                                <>
+                                  <strong className="property-ledger-tenant-label">
+                                    {occupiedUnits} active {occupiedUnits === 1 ? "tenant" : "tenants"}
+                                  </strong>
+                                  <span className="property-ledger-cell-note">
+                                    {vacantUnits} vacant
+                                    {row.expiringLeases > 0 ? ` · ${row.expiringLeases} leases expiring` : ""}
+                                  </span>
+                                </>
+                              ) : primaryUnit ? (
+                                <>
+                                  {primaryUnit.tenantName ? (
+                                    <strong className="property-ledger-tenant-label">
+                                      {primaryUnit.tenantName}
+                                    </strong>
+                                  ) : (
+                                    <strong>{primaryUnit.upcomingTenancy ? "Upcoming tenancy" : "Vacant"}</strong>
+                                  )}
+                                  <span className="property-ledger-cell-note">
+                                    {primaryUnit.leaseStatus
+                                      ? primaryUnit.leaseStatus.replaceAll("_", " ")
+                                      : primaryUnit.occupied ? "No active lease" : "Ready for tenant"}
+                                    {primaryUnit.leaseEndDate
+                                      ? ` · Ends ${primaryUnit.leaseEndDate.slice(0, 10)}`
+                                      : ""}
+                                  </span>
+                                </>
+                              ) : (
+                                <span className="property-ledger-cell-note">Add a unit to get started</span>
+                              )}
+                            </td>
+                            <td className="property-ledger-money-cell" data-label={`Rent & Balance (${currency})`}>
+                              <strong>
+                                {isMultiUnit
+                                  ? `${formatAmount(row.collected, currency)} / ${formatAmount(row.expected, currency)}`
+                                  : primaryUnit
+                                    ? formatAmount(primaryUnit.rentAmount, currency)
+                                    : "—"}
+                              </strong>
+                              <span className={`property-ledger-rent-status is-${propertyRentStatusType.toLowerCase().replaceAll("_", "-")}`}>
+                                {propertyRentStatusType === "NO_TENANTS" && <UserRound size={10} aria-hidden="true" />}
+                                {propertyRentStatusText}
+                              </span>
+                            </td>
+                            <td className="property-ledger-money-cell" data-label="Deposit Held">
+                              <strong>{formatAmount(heldDeposit, currency)}</strong>
+                              <span className="property-ledger-cell-note">
+                                Across {occupiedUnits} active {occupiedUnits === 1 ? "tenancy" : "tenancies"}
+                              </span>
+                            </td>
+                            <td data-label="Maintenance & Follow-up">
+                              <div className="property-ledger-maintenance">
+                                {propertyOpenTickets.length > 0 || row.attention > 0 ? (
+                                  <button
+                                    type="button"
+                                    aria-label={[
+                                      propertyOpenTickets.length
+                                        ? `${propertyOpenTickets.length} open maintenance ${propertyOpenTickets.length === 1 ? "ticket" : "tickets"}`
+                                        : "",
+                                      row.attention
+                                        ? `${row.attention} follow-up ${row.attention === 1 ? "item" : "items"}`
+                                        : "",
+                                    ].filter(Boolean).join(" and ") + ` for ${stringValue(property.name)}`}
+                                    title={[
+                                      ...propertyOpenTickets.map(({ ticket }) =>
+                                        stringValue(ticket.description, stringValue(ticket.category, "Maintenance request")),
+                                      ),
+                                      ...row.attentionItems.map((item) => `${item.title}: ${item.detail}`),
+                                    ].join("; ")}
+                                    className="property-ledger-alert-button"
+                                    onClick={() => {
+                                      if (row.attention > 0) {
+                                        setPropertyAction(!isMultiUnit && primaryUnit
+                                          ? {
+                                              type: "manage",
+                                              propertyId,
+                                              unitId: primaryUnit.unitId,
+                                              initialTab: "notifications",
+                                            }
+                                          : { type: "manage-property", propertyId, initialTab: "notifications" });
+                                      } else {
+                                        const firstTicket = propertyOpenTickets[0];
+                                        setPropertyAction({
+                                          type: "manage",
+                                          propertyId,
+                                          unitId: firstTicket.unit.unitId,
+                                          initialTab: "repairs",
+                                        });
+                                      }
+                                    }}
+                                  >
+                                    <BellRing size={14} aria-hidden="true" />
+                                  </button>
+                                ) : propertyUnits.length === 0 ? (
+                                  <span className="property-ledger-maintenance-clear">No units yet</span>
+                                ) : (
+                                  <span className="property-ledger-maintenance-clear">
+                                    <span className="property-maintenance-clear-dot" aria-hidden="true" />
+                                    All clear
+                                  </span>
+                                )}
+                              </div>
+                            </td>
+                            <td data-label="Actions">
+                              <div className="property-ledger-row-actions">
+                                {isMultiUnit ? (
+                                  <>
+                                    <button
+                                      type="button"
+                                      className="property-row-action-button is-secondary"
+                                      disabled={!canManageCurrentRecords}
+                                      onClick={() => setPropertyAction({ type: "add-unit", propertyId })}
+                                    >
+                                      <Plus size={13} /> Add Unit
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="property-row-action-button is-primary"
+                                      aria-expanded={isExpanded}
+                                      onClick={() =>
+                                        setExpandedPropertyIds((current) => ({
+                                          ...current,
+                                          [propertyId]: !current[propertyId],
+                                        }))
+                                      }
+                                    >
+                                      {isExpanded ? "Collapse" : `View Units (${propertyUnits.length})`}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="property-row-action-button is-secondary"
+                                      onClick={() => setPropertyAction({ type: "manage-property", propertyId })}
+                                    >
+                                      Manage
+                                    </button>
+                                  </>
+                                ) : primaryUnit ? (
+                                  primaryUnit.activeTenancy ? (
+                                    <>
+                                      <button
+                                        type="button"
+                                        className="property-row-action-button is-primary"
+                                        disabled={!canManageCurrentRecords}
+                                        onClick={() => setPropertyAction({
+                                          type: "rent",
+                                          propertyId,
+                                          unitId: primaryUnit.unitId,
+                                        })}
+                                      >
+                                        <Receipt size={13} /> Record Rent
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="property-row-action-button is-secondary"
+                                        onClick={() => setPropertyAction({
+                                          type: "manage",
+                                          propertyId,
+                                          unitId: primaryUnit.unitId,
+                                        })}
+                                      >
+                                        Manage
+                                      </button>
+                                    </>
+                                  ) : primaryUnit.upcomingTenancy ? (
+                                    <button
+                                      type="button"
+                                      className="property-row-action-button is-secondary"
+                                      onClick={() => setPropertyAction({
+                                        type: "manage",
+                                        propertyId,
+                                        unitId: primaryUnit.unitId,
+                                      })}
+                                    >
+                                      Manage
+                                    </button>
+                                  ) : (
+                                    <>
+                                      <button
+                                        type="button"
+                                        className="property-row-action-button is-primary"
+                                        disabled={!canManageCurrentRecords}
+                                        onClick={() => setPropertyAction({
+                                          type: "assign",
+                                          propertyId,
+                                          unitId: primaryUnit.unitId,
+                                        })}
+                                      >
+                                        Assign Tenant
+                                      </button>
+                                      <button
+                                        type="button"
+                                        className="property-row-action-button is-secondary"
+                                        onClick={() => setPropertyAction({
+                                          type: "manage",
+                                          propertyId,
+                                          unitId: primaryUnit.unitId,
+                                        })}
+                                      >
+                                        Manage
+                                      </button>
+                                    </>
+                                  )
+                                ) : (
+                                  <>
+                                    <button
+                                      type="button"
+                                      className="property-row-action-button is-secondary"
+                                      disabled={!canManageCurrentRecords}
+                                      onClick={() => setPropertyAction({ type: "add-unit", propertyId })}
+                                    >
+                                      <Plus size={13} /> Add Unit
+                                    </button>
+                                    <button
+                                      type="button"
+                                      className="property-row-action-button is-secondary"
+                                      onClick={() => setPropertyAction({ type: "manage-property", propertyId })}
+                                    >
+                                      Manage
+                                    </button>
+                                  </>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                          {isMultiUnit && isExpanded && visibleUnitSummaries.map((unit) => {
+                            const unitStatusLabel =
+                              unit.rentStatus === "NO_TENANTS"
+                                ? "No active rent"
+                                : rentStatusLabels[unit.rentStatus];
+                            const unitAttentionItems = row.attentionItems.filter(
+                              (item) => item.unitId === unit.unitId,
+                            );
+                            return (
+                              <tr className="property-ledger-unit-row" key={`${propertyId}-${unit.unitId}`}>
+                                <td className="properties-property-cell" data-label="Property / Unit">
+                                  <div className="property-ledger-unit-cell">
+                                    <span className="property-ledger-tree-branch" aria-hidden="true" />
+                                    <span className="properties-property-info">
+                                      <strong>Unit {stringValue(unit.unit.unitNumber, "—")}</strong>
+                                      <small>
+                                        {unit.unit.bedrooms ? `${stringValue(unit.unit.bedrooms)} bedrooms` : "Rental unit"}
+                                        {unit.unit.floor ? ` · Floor ${stringValue(unit.unit.floor)}` : ""}
+                                      </small>
+                                    </span>
+                                  </div>
+                                </td>
+                                <td data-label="Tenant & Lease">
+                                  {unit.tenantName ? (
+                                    <strong className="property-ledger-tenant-label">
+                                      {unit.tenantName}
+                                    </strong>
+                                  ) : (
+                                    <strong>{unit.upcomingTenancy ? "Upcoming tenancy" : "Vacant"}</strong>
+                                  )}
+                                  <span className="property-ledger-cell-note">
+                                    {unit.leaseStatus
+                                      ? unit.leaseStatus.replaceAll("_", " ")
+                                      : unit.occupied ? "No active lease" : "Ready for tenant"}
+                                    {unit.leaseEndDate ? ` · Ends ${unit.leaseEndDate.slice(0, 10)}` : ""}
+                                  </span>
+                                </td>
+                                <td className="property-ledger-money-cell" data-label={`Rent & Balance (${currency})`}>
+                                  <strong>{formatAmount(unit.rentAmount, currency)}<small> /mo</small></strong>
+                                  <span className={`property-ledger-rent-status is-${unit.rentStatus.toLowerCase().replaceAll("_", "-")}`}>
+                                    {unit.rentStatus === "NO_TENANTS" && <UserRound size={10} aria-hidden="true" />}
+                                    {unit.balance > BigInt(0)
+                                      ? `${unitStatusLabel} · ${formatAmount(unit.balance, currency)} due`
+                                      : unitStatusLabel}
+                                  </span>
+                                </td>
+                                <td className="property-ledger-money-cell" data-label="Deposit Held">
+                                  <strong>{formatAmount(unit.depositHeld, currency)}</strong>
+                                  <span className="property-ledger-cell-note">
+                                    {unit.depositRequired > unit.depositHeld
+                                      ? `Required ${formatAmount(unit.depositRequired, currency)}`
+                                      : unit.depositHeld > BigInt(0) ? "Held" : "No deposit recorded"}
+                                  </span>
+                                </td>
+                                <td data-label="Maintenance & Follow-up">
+                                  <div className="property-ledger-maintenance">
+                                    {unit.openMaintenance.length > 0 || unitAttentionItems.length > 0 ? (
+                                      <button
+                                        type="button"
+                                        className="property-ledger-alert-button"
+                                        aria-label={[
+                                          unit.openMaintenance.length
+                                            ? `${unit.openMaintenance.length} open maintenance ${unit.openMaintenance.length === 1 ? "ticket" : "tickets"}`
+                                            : "",
+                                          unitAttentionItems.length
+                                            ? `${unitAttentionItems.length} follow-up ${unitAttentionItems.length === 1 ? "item" : "items"}`
+                                            : "",
+                                        ].filter(Boolean).join(" and ") + ` for Unit ${stringValue(unit.unit.unitNumber)}`}
+                                        title={[
+                                          ...unit.openMaintenance.map((ticket) =>
+                                            stringValue(ticket.description, stringValue(ticket.category, "Maintenance request")),
+                                          ),
+                                          ...unitAttentionItems.map((item) => `${item.title}: ${item.detail}`),
+                                        ].join("; ")}
+                                        onClick={() => setPropertyAction({
+                                          type: "manage",
+                                          propertyId,
+                                          unitId: unit.unitId,
+                                          initialTab: unitAttentionItems.length ? "notifications" : "repairs",
+                                        })}
+                                      >
+                                        <BellRing size={14} aria-hidden="true" />
+                                      </button>
+                                    ) : (
+                                      <span className="property-ledger-maintenance-clear">
+                                        <span className="property-maintenance-clear-dot" aria-hidden="true" />
+                                        All clear
+                                      </span>
+                                    )}
+                                  </div>
+                                </td>
+                                <td data-label="Actions">
+                                  <div className="property-ledger-row-actions">
+                                    {unit.activeTenancy ? (
+                                      <>
+                                        <button
+                                          type="button"
+                                          className="property-row-action-button is-primary"
+                                          disabled={!canManageCurrentRecords}
+                                          onClick={() => setPropertyAction({
+                                            type: "rent",
+                                            propertyId,
+                                            unitId: unit.unitId,
+                                          })}
+                                        >
+                                          <Receipt size={13} /> Record Rent
+                                        </button>
+                                        <button
+                                          type="button"
+                                          className="property-row-action-button is-secondary"
+                                          onClick={() => setPropertyAction({
+                                            type: "manage",
+                                            propertyId,
+                                            unitId: unit.unitId,
+                                          })}
+                                        >
+                                          Manage
+                                        </button>
+                                      </>
+                                    ) : unit.upcomingTenancy ? (
+                                      <button
+                                        type="button"
+                                        className="property-row-action-button is-secondary"
+                                        onClick={() => setPropertyAction({
+                                          type: "manage",
+                                          propertyId,
+                                          unitId: unit.unitId,
+                                        })}
+                                      >
+                                        Manage
+                                      </button>
+                                    ) : (
+                                      <>
+                                        <button
+                                          type="button"
+                                          className="property-row-action-button is-primary"
+                                          disabled={!canManageCurrentRecords}
+                                          onClick={() => setPropertyAction({
+                                            type: "assign",
+                                            propertyId,
+                                            unitId: unit.unitId,
+                                          })}
+                                        >
+                                          Assign Tenant
+                                        </button>
+                                        <button
+                                          type="button"
+                                          className="property-row-action-button is-secondary"
+                                          onClick={() => setPropertyAction({
+                                            type: "manage",
+                                            propertyId,
+                                            unitId: unit.unitId,
+                                          })}
+                                        >
+                                          Manage
+                                        </button>
+                                      </>
+                                    )}
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </Fragment>
+                      );
+                    })}
+                    {!visiblePropertyRows.length && (
+                      <tr><td className="properties-empty-cell" colSpan={6}>No properties match those filters.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+              <div className="properties-pagination">
+                <span>
+                  {filteredPropertyRows.length
+                    ? `Showing ${(propertyPage - 1) * pageSize + 1}–${Math.min(propertyPage * pageSize, filteredPropertyRows.length)} of ${filteredPropertyRows.length} properties`
+                    : "0 properties"}
+                </span>
+                <div>
+                  <button
+                    type="button"
+                    aria-label="Previous properties page"
+                    disabled={propertyPage <= 1}
+                    onClick={() => setPropertyPage((page) => Math.max(1, page - 1))}
+                  ><ChevronLeft size={16} /></button>
+                  <span>Page {Math.min(propertyPage, pageCount)} of {pageCount}</span>
+                  <button
+                    type="button"
+                    aria-label="Next properties page"
+                    disabled={propertyPage >= pageCount}
+                    onClick={() => setPropertyPage((page) => Math.min(pageCount, page + 1))}
+                  ><ChevronRight size={16} /></button>
+                </div>
+              </div>
+            </section>
+          </div>
+        )
       ) : section === "Reports" ? (
         <ReportView
           report={record(data.report)}
@@ -1501,31 +3570,70 @@ export function LandlordSectionWorkspace({
           <RecordList rows={rowsFor(record(data.settings), "auditLogs")} currency={currency} section={section} />
         </section>
       ) : (
-        <div className="landlord-workspace-grid">
+        <div className={`landlord-workspace-grid${unitDetailsOnly ? " is-unit-details-only" : ""}`}>
           <section className="landlord-panel landlord-records-panel">
             <div className="landlord-panel-heading">
               <div>
-                <h2>{section === "Rent & Deposits" ? rentMode === "charges" ? "Rent charges" : rentMode === "payments" ? "Recorded payments" : "Deposit ledgers" : section === "Tenants" && tenantMode === "tenancies" ? "Tenancies" : section}</h2>
+                <h2>{unitDetailsOnly ? "Unit details" : section === "Rent & Deposits" ? rentMode === "charges" ? "Rent charges" : rentMode === "payments" ? "Recorded payments" : "Deposit ledgers" : section === "Tenants" && tenantMode === "tenancies" ? "Tenancies" : section}</h2>
               </div>
               <div className="landlord-records-heading-actions">
                 {loading && <LoaderCircle className="landlord-spinner" size={17} />}
-                {canCreateCurrentRecord && (
+                {canCreateCurrentRecord && !unitDetailsOnly && (
                   <button
                     className="dashboard-primary-button landlord-add-record-button"
                     ref={addButtonRef}
                     type="button"
-                    onClick={openForm}
+                    onClick={() => openForm()}
                   >
                     <Plus size={16} /> {formActionLabel}
                   </button>
                 )}
               </div>
             </div>
-            {section === "Properties" && propertyView === "owners" ? (
-              <PropertyOwnerList
-                rows={rowsFor(data, "propertyOwners")}
-                onEdit={canManagePropertyOwners ? editRecord : undefined}
-              />
+            {unitDetailsOnly && section === "Units" ? (
+              <div className="property-units-table-wrap">
+                <table className="property-units-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">Unit name</th>
+                      <th scope="col">Area</th>
+                      <th scope="col">Floor</th>
+                      <th scope="col">Bedrooms</th>
+                      <th scope="col">Bathrooms</th>
+                      <th scope="col">Price</th>
+                      <th scope="col"><span className="visually-hidden">Actions</span></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {rowsFor(data, "units").map((unit) => (
+                      <tr key={stringValue(unit.id)}>
+                        <td>Unit {stringValue(unit.unitNumber, "—")}</td>
+                        <td>{unit.sizeSqm ? `${stringValue(unit.sizeSqm)} m²` : "—"}</td>
+                        <td>{stringValue(unit.floor, "—")}</td>
+                        <td>{stringValue(unit.bedrooms, "—")}</td>
+                        <td>{stringValue(unit.bathrooms, "—")}</td>
+                        <td>{formatAmount(unit.rentAmount, currency)}</td>
+                        <td className="property-unit-details-edit-cell">
+                          {canManageRecords && (
+                            <button
+                              className="landlord-icon-button"
+                              type="button"
+                              aria-label={`Edit Unit ${stringValue(unit.unitNumber)}`}
+                              title="Edit unit"
+                              onClick={() => editRecord(unit)}
+                            >
+                              <Pencil size={15} />
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                    {!loading && rowsFor(data, "units").length === 0 && (
+                      <tr><td colSpan={7}>No unit details are available.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
             ) : section === "Rent & Deposits" ? (
               <RecordList
                 rows={rentMode === "charges" ? charges : rentMode === "payments" ? rowsFor(data, "payments") : deposits}
@@ -1534,6 +3642,7 @@ export function LandlordSectionWorkspace({
                 rentMode={rentMode}
                 onReverse={(path) => void requestReversal(path)}
                 onReceipt={(id) => void downloadReceipt(id)}
+                onDownload={rentMode === "payments" ? (fileId) => void downloadFile(fileId) : undefined}
               />
             ) : section === "Maintenance" ? (
               <MaintenanceList
@@ -1566,6 +3675,7 @@ export function LandlordSectionWorkspace({
                 section={section}
                 onDownload={(fileId) => void downloadFile(fileId)}
                 onLeaseStatus={canManageRecords ? (row, status) => void updateLeaseStatus(row, status) : undefined}
+                onResendLease={canManageRecords ? setLeaseResendSelection : undefined}
               />
             ) : section === "Inspections" ? (
               <RecordList rows={rowsFor(data, "inspections")} currency={currency} section={section} onDownload={(fileId) => void downloadFile(fileId)} />
@@ -1608,70 +3718,11 @@ export function LandlordSectionWorkspace({
                     : undefined}
               />
             )}
-            {!loading && rowsFor(data, section === "Properties" && propertyView === "owners" ? "propertyOwners" : section === "Tenants" && tenantMode === "tenancies" ? "tenancies" : sectionDataKey(section, rentMode)).length === 0 && (
+            {!loading && !unitDetailsOnly && rowsFor(data, section === "Tenants" && tenantMode === "tenancies" ? "tenancies" : sectionDataKey(section, rentMode)).length === 0 && (
               <p className="landlord-empty-state">No records yet. Add your first record to get started.</p>
             )}
           </section>
 
-          {formOpen && (
-            <div
-              className="landlord-form-modal-backdrop"
-              onMouseDown={(event) => {
-                if (event.target === event.currentTarget) closeForm();
-              }}
-            >
-              <div
-                className="landlord-form-modal"
-                ref={formDialogRef}
-                role="dialog"
-                aria-modal="true"
-                aria-labelledby="landlord-form-modal-title"
-                tabIndex={-1}
-              >
-                <div className="landlord-form-modal-header">
-                  <span className="landlord-form-modal-icon" aria-hidden="true"><FormIcon size={20} /></span>
-                  <div>
-                    <span className="dashboard-date">PROPEASE WORKSPACE</span>
-                    <h2 id="landlord-form-modal-title">{formTitle}</h2>
-                    <p>{section === "Rent & Deposits" && rentMode === "payments" ? "Manually recorded, not independently bank-verified." : "Complete the fields below to continue."}</p>
-                  </div>
-                  <button
-                    className="landlord-form-modal-close"
-                    type="button"
-                    aria-label="Close form"
-                    onClick={closeForm}
-                    disabled={saving}
-                  >
-                    <X size={19} />
-                  </button>
-                </div>
-                <Form
-                  fields={fields}
-                  values={form}
-                  onChange={updateField}
-                  onSubmit={submit}
-                  canEdit={canManageCurrentRecords}
-                  saving={saving}
-                  selectedFile={selectedFile}
-                  organisationId={organisationId}
-                  onFile={setSelectedFile}
-                  submitLabel={editingId ? "Save changes" : undefined}
-                  onCancel={closeForm}
-                  helperText={section === "Rent & Deposits" && rentMode === "payments"
-                    ? "An allocation is optional; if omitted, the payment remains unapplied and the rent balance will not be reduced."
-                    : section === "Leases"
-                      ? "Choose a tenant first, then select one of their active or upcoming tenancies. Tenants without a current or scheduled unit assignment cannot have a lease created yet."
-                    : section === "Tenants" && tenantMode === "tenancies"
-                      ? availableUnitCount > 0
-                        ? "Only units marked available are suggested."
-                        : "There are no units currently marked available. Update a unit's availability before assigning it."
-                    : section === "Utilities"
-                      ? "The total is split equally across selected units using whole cents; any remainder cents are assigned one by one."
-                      : undefined}
-                />
-              </div>
-            </div>
-          )}
           {textRequest && (
             <TextEntryDialog
               key={`${textRequest.title}-${textRequest.label}`}
@@ -1718,6 +3769,269 @@ export function LandlordSectionWorkspace({
           )}
         </div>
       )}
+      {formOpen && (
+        <div
+          className={`landlord-form-modal-backdrop${isRentPaymentDialog || isPropertyEditDrawer ? " property-setup-backdrop" : ""}`}
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) closeForm();
+          }}
+        >
+          <div
+            className={`landlord-form-modal${isRentPaymentDialog || isPropertyEditDrawer ? " property-setup-drawer" : ""}${isPropertyEditDrawer ? " property-form-drawer" : ""}`}
+            ref={formDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="landlord-form-modal-title"
+            tabIndex={-1}
+          >
+            <div className={`landlord-form-modal-header${isPropertyEditDrawer ? " property-form-drawer-header" : ""}`}>
+              <span className="landlord-form-modal-icon" aria-hidden="true"><FormIcon size={20} /></span>
+              <div>
+                <span className="dashboard-date">{isRentPaymentDialog ? `RENT RECORDING · STEP ${paymentReviewStep + 1} OF 2` : "PROPEASE WORKSPACE"}</span>
+                <h2 id="landlord-form-modal-title">{isRentPaymentDialog ? paymentReviewStep === 0 ? "Record rent" : "Verify payment" : formTitle}</h2>
+                <p>{isRentPaymentDialog ? "User Recorded · not independently verified by a bank or payment provider." : "Complete the fields below to continue."}</p>
+              </div>
+              <button
+                className="landlord-form-modal-close"
+                type="button"
+                aria-label="Close form"
+                onClick={closeForm}
+                disabled={saving}
+              >
+                <X size={19} />
+              </button>
+            </div>
+            {isRentPaymentDialog && paymentReviewStep === 1 ? (
+              <form className="rent-payment-review-form" onSubmit={submit}>
+                <div className="rent-payment-review-content">
+                  <span className="rent-user-recorded-badge"><Check size={13} /> User Recorded</span>
+                  <h3>Review the rent payment</h3>
+                  <dl>
+                    <div><dt>Tenant</dt><dd>{stringValue([...tenants, ...createdTenants].find((tenant) => stringValue(tenant.id, "") === form.tenantId)?.legalName, "Tenant")}</dd></div>
+                    <div><dt>Payment channel</dt><dd>{paymentChannelLabel}</dd></div>
+                    <div><dt>Reference</dt><dd>{form.reference || "Not provided"}</dd></div>
+                    <div><dt>Date received</dt><dd>{dateLabel(form.receivedAt)}</dd></div>
+                    <div><dt>Amount received</dt><dd>{formatAmount(paymentReviewAmount, currency)}</dd></div>
+                    <div><dt>Current open balance</dt><dd>{paymentReviewCharge ? formatAmount(paymentReviewOpenBalance, currency) : "No rent charge selected"}</dd></div>
+                    <div><dt>Allocated to rent</dt><dd>{formatAmount(paymentReviewAllocation, currency)}</dd></div>
+                    <div><dt>Remaining balance</dt><dd>{paymentReviewCharge ? formatAmount(paymentReviewRemaining, currency) : "—"}</dd></div>
+                    <div><dt>Advance credit carried forward</dt><dd>{formatAmount(paymentReviewAdvance, currency)}</dd></div>
+                  </dl>
+                  <p>The receipt will be labeled “User Recorded.” Any unapplied amount remains in the ledger as advance credit; it is not represented as a verified bank settlement.</p>
+                </div>
+                {error && <p className="property-onboarding-error" role="alert">{error}</p>}
+                <footer className="landlord-form-actions">
+                  <button className="dashboard-secondary-button" type="button" onClick={() => setPaymentReviewStep(0)} disabled={saving}>Back to details</button>
+                  <button className="dashboard-primary-button" type="submit" disabled={saving || !canManageCurrentRecords}>
+                    {saving ? <LoaderCircle className="landlord-spinner" size={15} /> : <Receipt size={15} />}
+                    {saving ? "Recording…" : "Record payment"}
+                  </button>
+                  <button className="landlord-form-cancel-button" type="button" onClick={closeForm} disabled={saving}>Cancel</button>
+                </footer>
+              </form>
+            ) : (
+              <Form
+                fields={fields}
+                values={form}
+                onChange={updateField}
+                onSubmit={submit}
+                canEdit={canManageCurrentRecords}
+                saving={saving}
+                selectedFile={selectedFile}
+                organisationId={organisationId}
+                onFile={setSelectedFile}
+                submitLabel={isRentPaymentDialog ? "Review payment" : editingId ? "Save changes" : undefined}
+                onCancel={closeForm}
+                helperText={isRentPaymentDialog
+                  ? "Choose an open rent charge to allocate the payment. The form suggests the oldest open balance; any unallocated amount is carried forward as advance credit."
+                  : section === "Leases"
+                    ? "Choose a tenant first, then select one of their active or upcoming tenancies. Tenants without a current or scheduled unit assignment cannot have a lease created yet."
+                    : section === "Tenants" && tenantMode === "tenancies"
+                      ? availableUnitCount > 0
+                        ? "Only units marked available are suggested."
+                        : "There are no units currently marked available. Update a unit's availability before assigning it."
+                      : section === "Utilities"
+                        ? currency === "RWF"
+                          ? "RWF bills are allocated in whole francs; any remainder francs are assigned one by one."
+                          : "The total is allocated exactly in minor units; any remainder units are assigned one by one."
+                        : undefined}
+              />
+            )}
+          </div>
+        </div>
+      )}
+      {section === "Properties" && propertySetupOpen && (
+        <PropertySetupDrawer
+          organisationId={organisationId}
+          currency={currency}
+          onClose={() => setPropertySetupOpen(false)}
+          onComplete={(result, assignTenant) => {
+            const propertyId = stringValue(result.property.id, "");
+            const initialUnitId = stringValue(result.units[0]?.id, "") || null;
+            setPropertySetupOpen(false);
+            setRefreshKey((key) => key + 1);
+            onUpdated();
+            if (assignTenant && propertyId && initialUnitId) {
+              setPropertySetupContext(result);
+              setTenantLeaseOnboardingUnitId(initialUnitId);
+              setTenantLeaseOnboardingOpen(true);
+            } else {
+              setSuccess("Property and rental spaces created.");
+            }
+          }}
+        />
+      )}
+      {tenantLeaseOnboardingOpen && propertySetupContext && (
+        <TenantLeaseOnboardingDialog
+          organisationId={organisationId}
+          property={propertySetupContext.property}
+          units={propertySetupContext.units}
+          tenancies={tenancies}
+          initialUnitId={tenantLeaseOnboardingUnitId}
+          currency={currency}
+          onClose={() => {
+            setTenantLeaseOnboardingOpen(false);
+            setPropertySetupContext(null);
+          }}
+          onComplete={(emailSent) => {
+            setTenantLeaseOnboardingOpen(false);
+            setPropertySetupContext(null);
+            setTenantLeaseOnboardingUnitId(null);
+            setRefreshKey((key) => key + 1);
+            setSuccess(emailSent
+              ? "Lease offer created and review email sent."
+              : "Lease offer created, but the review email could not be delivered.");
+            onUpdated();
+          }}
+        />
+      )}
+      {propertyAction?.type === "assign" && actionProperty && (
+        <TenantLeaseOnboardingDialog
+          organisationId={organisationId}
+          property={actionProperty}
+          units={units.filter((unit) => propertyIdFrom(unit) === propertyAction.propertyId)}
+          tenancies={tenancies}
+          initialUnitId={propertyAction.unitId}
+          fixedUnitId={propertyAction.unitId}
+          currency={currency}
+          onClose={() => setPropertyAction(null)}
+          onComplete={(emailSent) => {
+            setPropertyAction(null);
+            setRefreshKey((key) => key + 1);
+            setSuccess(emailSent
+              ? "Lease offer created and review email sent."
+              : "Lease offer created, but the review email could not be delivered.");
+            onUpdated();
+          }}
+        />
+      )}
+      {leaseResendSelection && (
+        <TenantLeaseResendDialog
+          organisationId={organisationId}
+          lease={leaseResendSelection}
+          tenant={tenants.find(
+            (tenant) => stringValue(tenant.id, "") === stringValue(nested(leaseResendSelection, "tenancy", "tenant", "id"), ""),
+          ) ?? {}}
+          tenancy={tenancies.find(
+            (tenancy) => stringValue(tenancy.id, "") === stringValue(nested(leaseResendSelection, "tenancy", "id"), ""),
+          ) ?? {}}
+          deposit={deposits.find(
+            (deposit) => stringValue(nested(deposit, "tenancy", "id"), "") === stringValue(nested(leaseResendSelection, "tenancy", "id"), ""),
+          ) ?? {}}
+          currency={currency}
+          onClose={() => setLeaseResendSelection(null)}
+          onComplete={(emailSent) => {
+            setLeaseResendSelection(null);
+            setSuccess(emailSent
+              ? "Updated lease offer sent to the tenant."
+              : "Lease offer updated, but the review email could not be delivered.");
+            setRefreshKey((key) => key + 1);
+            onUpdated();
+          }}
+        />
+      )}
+      {propertyAction && actionProperty && propertyAction.type !== "assign" && (
+        <PropertyActionDrawer
+          key={`${propertyAction.type}-${propertyAction.propertyId}-${"unitId" in propertyAction ? propertyAction.unitId : ""}-${propertyAction.type === "manage" || propertyAction.type === "manage-property" ? propertyAction.initialTab ?? "overview" : ""}`}
+          action={propertyAction}
+          property={actionProperty}
+          unit={actionUnit}
+          details={actionUnitDetails}
+          attentionItems={actionAttentionItems}
+          attentionReadError={attentionReadError}
+          data={data}
+          base={base}
+          currency={currency}
+          onUploadFile={uploadFile}
+          onOpenFile={(fileId) => void downloadFile(fileId)}
+          onClose={() => setPropertyAction(null)}
+          onRecordRent={() => {
+            if (!("unitId" in propertyAction)) return;
+            setPropertyAction({
+              type: "rent",
+              propertyId: propertyAction.propertyId,
+              unitId: propertyAction.unitId,
+            });
+          }}
+          onAssignTenant={() => {
+            if (!("unitId" in propertyAction)) return;
+            setPropertyAction({
+              type: "assign",
+              propertyId: propertyAction.propertyId,
+              unitId: propertyAction.unitId,
+            });
+          }}
+          canEdit={canManageCurrentRecords}
+          onEditProperty={() => {
+            setPropertyAction(null);
+            editRecord(actionProperty);
+          }}
+          onAttentionOpen={(item) => {
+            markAttentionRead(item.id);
+            const nextTab: PropertyActionTab =
+              item.section === "Maintenance" || item.section === "Inspections"
+                ? "repairs"
+                : item.section === "Rent & Deposits"
+                  ? "ledger"
+                  : "overview";
+            setPropertyAction(item.unitId
+              ? {
+                  type: "manage",
+                  propertyId: propertyAction.propertyId,
+                  unitId: item.unitId,
+                  initialTab: nextTab,
+                }
+              : {
+                  type: "manage-property",
+                  propertyId: propertyAction.propertyId,
+                  initialTab: "overview",
+                });
+          }}
+          onRefresh={() => {
+            setRefreshKey((key) => key + 1);
+            onUpdated();
+          }}
+          onTicketCompleted={(ticket) => {
+            setData((current) => ({
+              ...current,
+              requests: rowsFor(current, "requests").map((request) =>
+                stringValue(request.id, "") === stringValue(ticket.id, "")
+                  ? { ...request, ...ticket, status: "COMPLETED" }
+                  : request,
+              ),
+            }));
+            setRefreshKey((key) => key + 1);
+            onUpdated();
+          }}
+          onComplete={(message, paymentId) => {
+            setPropertyAction(null);
+            setSuccess(message);
+            setRefreshKey((key) => key + 1);
+            onUpdated();
+            if (paymentId) void downloadReceipt(paymentId);
+          }}
+        />
+      )}
     </div>
   );
 
@@ -1737,6 +4051,1579 @@ export function LandlordSectionWorkspace({
       setError(requestError instanceof Error ? requestError.message : "The receipt could not be downloaded.");
     }
   }
+}
+
+type UnitBatchDraft = {
+  unitNumber: string;
+  floor: string;
+  rentAmount: string;
+  depositAmount: string;
+  bedrooms: string;
+  bathrooms: string;
+};
+
+function PropertyNotificationPanel({
+  items,
+  readError,
+  scope,
+  onOpen,
+}: {
+  items: PropertyAttentionItem[];
+  readError: string | null;
+  scope: "property" | "unit";
+  onOpen: (item: PropertyAttentionItem) => void;
+}) {
+  return (
+    <section className="property-action-review-panel" aria-label={`${scope} notifications`}>
+      <h3>Notifications ({items.length})</h3>
+      {readError && <p className="property-action-empty" role="alert">{readError}</p>}
+      {items.length ? items.map((item) => (
+        <button
+          type="button"
+          className="property-action-review-card"
+          key={item.id}
+          onClick={() => onOpen(item)}
+        >
+          <strong>{item.title}</strong>
+          <span>{item.detail}</span>
+          <small>Open {item.section} · Mark as read</small>
+        </button>
+      )) : !readError && (
+        <p className="property-action-empty">No unread notifications for this {scope}.</p>
+      )}
+    </section>
+  );
+}
+
+function PropertyActionDrawer({
+  action,
+  property,
+  unit,
+  details,
+  attentionItems,
+  attentionReadError,
+  data,
+  base,
+  currency,
+  onUploadFile,
+  onOpenFile,
+  onClose,
+  onRecordRent,
+  onAssignTenant,
+  canEdit,
+  onEditProperty,
+  onAttentionOpen,
+  onRefresh,
+  onTicketCompleted,
+  onComplete,
+}: {
+  action: PropertyActionState;
+  property: ValueRecord;
+  unit: ValueRecord | null;
+  details: UnitLedgerDetails | null;
+  attentionItems: PropertyAttentionItem[];
+  attentionReadError: string | null;
+  data: ValueRecord;
+  base: string;
+  currency: string;
+  onUploadFile: (file: File) => Promise<string>;
+  onOpenFile: (fileId: string) => void;
+  onClose: () => void;
+  onRecordRent: () => void;
+  onAssignTenant: () => void;
+  canEdit: boolean;
+  onEditProperty: () => void;
+  onAttentionOpen: (item: PropertyAttentionItem) => void;
+  onRefresh: () => void;
+  onTicketCompleted: (ticket: ValueRecord) => void;
+  onComplete: (message: string, paymentId?: string) => void;
+}) {
+  const today = new Date().toISOString().slice(0, 10);
+  const propertyUnits = rowsFor(data, "units").filter(
+    (row) => propertyIdFrom(row) === action.propertyId,
+  );
+  const templateUnit = propertyUnits[0];
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [tab, setTab] = useState<PropertyActionTab>(
+    action.type === "manage" || action.type === "manage-property"
+      ? action.initialTab ?? "overview"
+      : "overview",
+  );
+  const [rentStep, setRentStep] = useState<0 | 1>(0);
+  const [selectedRentTenancyId, setSelectedRentTenancyId] = useState(() =>
+    stringValue(details?.activeTenancy?.id, ""),
+  );
+  const [unitRows, setUnitRows] = useState<UnitBatchDraft[]>(() => [{
+    unitNumber: "",
+    floor: "",
+    rentAmount: String(templateUnit?.rentAmount ?? ""),
+    depositAmount: String(templateUnit?.depositAmount ?? "0"),
+    bedrooms: "",
+    bathrooms: "",
+  }]);
+  const [rentForm, setRentForm] = useState(() => ({
+    amount: details ? minorUnitsInput(details.balance, currency) : "",
+    method: "MTN_MOMO",
+    reference: "",
+    note: `${new Intl.DateTimeFormat("en", { month: "short", year: "numeric", timeZone: "UTC" }).format(new Date())} Rent`,
+    receivedAt: today,
+  }));
+  const [proofFile, setProofFile] = useState<File | null>(null);
+  const [uploadedProofFileId, setUploadedProofFileId] = useState<string | null>(null);
+  const proofFileInputRef = useRef<HTMLInputElement>(null);
+  const [reversalPaymentId, setReversalPaymentId] = useState<string | null>(null);
+  const [reversalReason, setReversalReason] = useState("");
+  const [ledgerSearch, setLedgerSearch] = useState("");
+  const [ledgerTypeFilter, setLedgerTypeFilter] = useState("all");
+  const [ledgerFromDate, setLedgerFromDate] = useState("");
+  const [ledgerToDate, setLedgerToDate] = useState("");
+  const [repairSavingId, setRepairSavingId] = useState<string | null>(null);
+  const [unitEditOpen, setUnitEditOpen] = useState(false);
+  const [unitEditSaving, setUnitEditSaving] = useState(false);
+  const [unitEditError, setUnitEditError] = useState<string | null>(null);
+  const [unitEditForm, setUnitEditForm] = useState(() => ({
+    unitNumber: stringValue(unit?.unitNumber, ""),
+    floor: stringValue(unit?.floor, ""),
+    bedrooms: stringValue(unit?.bedrooms, ""),
+    bathrooms: stringValue(unit?.bathrooms, ""),
+    sizeSqm: stringValue(unit?.sizeSqm, ""),
+    rentAmount: stringValue(unit?.rentAmount, ""),
+    depositAmount: stringValue(unit?.depositAmount, "0"),
+    utilityArrangement: stringValue(unit?.utilityArrangement, ""),
+  }));
+  const isHouse = stringValue(property.type, "").toUpperCase() === "HOUSE";
+  const isCommercial = stringValue(property.type, "").toUpperCase() === "COMMERCIAL";
+  const hasLease = Boolean(details?.activeTenancy || details?.upcomingTenancy);
+
+  async function saveUnitDetails(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!unit || !canEdit || unitEditSaving) return;
+
+    const bedrooms = Number(unitEditForm.bedrooms);
+    const bathrooms = Number(unitEditForm.bathrooms);
+    const sizeSqm = Number(unitEditForm.sizeSqm);
+    const rentAmount = Number(unitEditForm.rentAmount);
+    const depositAmount = Number(unitEditForm.depositAmount);
+    const hasResidentialDetails = !isCommercial;
+    if (!isHouse && !unitEditForm.unitNumber.trim()) {
+      setUnitEditError("Enter a unit number or name.");
+      return;
+    }
+    if (
+      hasResidentialDetails &&
+      ((isHouse && (!unitEditForm.bedrooms || !unitEditForm.bathrooms || !unitEditForm.sizeSqm)) ||
+        (unitEditForm.bedrooms && (!Number.isInteger(bedrooms) || bedrooms < 0 || bedrooms > 100)) ||
+        (unitEditForm.bathrooms && (!Number.isInteger(bathrooms) || bathrooms < 0 || bathrooms > 100)))
+    ) {
+      setUnitEditError("Enter valid bedroom and bathroom counts (0–100); all three home details are required for a house.");
+      return;
+    }
+    if (unitEditForm.sizeSqm && (!Number.isFinite(sizeSqm) || sizeSqm <= 0)) {
+      setUnitEditError("Enter a positive area.");
+      return;
+    }
+    if (!hasLease && (!Number.isFinite(rentAmount) || rentAmount <= 0)) {
+      setUnitEditError("Enter a positive monthly asking rent.");
+      return;
+    }
+    if (!hasLease && (!Number.isFinite(depositAmount) || depositAmount < 0)) {
+      setUnitEditError("Enter a deposit of zero or more.");
+      return;
+    }
+    if (
+      !hasLease &&
+      currency === "RWF" &&
+      (!Number.isInteger(rentAmount) || !Number.isInteger(depositAmount))
+    ) {
+      setUnitEditError("RWF rent and deposit must be entered as whole francs.");
+      return;
+    }
+
+    const input: Record<string, string | number> = {
+      utilityArrangement: unitEditForm.utilityArrangement.trim(),
+    };
+    if (!isHouse) {
+      input.unitNumber = unitEditForm.unitNumber.trim();
+      input.floor = unitEditForm.floor.trim();
+    }
+    if (hasResidentialDetails) {
+      if (unitEditForm.bedrooms) input.bedrooms = bedrooms;
+      if (unitEditForm.bathrooms) input.bathrooms = bathrooms;
+    }
+    if (unitEditForm.sizeSqm) input.sizeSqm = unitEditForm.sizeSqm;
+    if (!hasLease) {
+      input.rentAmount = unitEditForm.rentAmount;
+      input.depositAmount = unitEditForm.depositAmount;
+    }
+
+    setUnitEditSaving(true);
+    setUnitEditError(null);
+    try {
+      await apiRequest(`${base}/units/${stringValue(unit.id)}`, {
+        method: "PATCH",
+        body: JSON.stringify(input),
+      });
+      setUnitEditOpen(false);
+      onRefresh();
+    } catch (requestError) {
+      setUnitEditError(
+        requestError instanceof TypeError
+          ? "Couldn't reach the PropEase API. Check the API connection and try again."
+          : requestError instanceof Error
+            ? requestError.message
+            : "Unit details could not be updated.",
+      );
+    } finally {
+      setUnitEditSaving(false);
+    }
+  }
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !saving && !unitEditSaving) onClose();
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [onClose, saving, unitEditSaving]);
+
+  const tenancy = details?.tenancy ?? null;
+  const rentTenancies = rowsFor(data, "tenancies").filter(
+    (row) =>
+      row.status === "ACTIVE" &&
+      (action.type !== "rent" || stringValue(nested(row, "unit", "id"), "") === action.unitId),
+  );
+  if (
+    details?.activeTenancy &&
+    !rentTenancies.some((row) => stringValue(row.id, "") === stringValue(details.activeTenancy?.id, ""))
+  ) {
+    rentTenancies.unshift(details.activeTenancy);
+  }
+  const rentTenancy =
+    rentTenancies.find((row) => stringValue(row.id, "") === selectedRentTenancyId) ??
+    details?.activeTenancy ??
+    null;
+  const tenancyId = action.type === "rent"
+    ? stringValue(rentTenancy?.id, "")
+    : stringValue(tenancy?.id, "");
+  const unitId = stringValue(unit?.id, "");
+  const unitTenancyIds = new Set(
+    rowsFor(data, "tenancies")
+      .filter((row) => stringValue(nested(row, "unit", "id"), "") === unitId)
+      .map((row) => stringValue(row.id, ""))
+      .filter(Boolean),
+  );
+  for (const relatedTenancy of [tenancy, details?.activeTenancy, details?.upcomingTenancy]) {
+    const relatedTenancyId = stringValue(relatedTenancy?.id, "");
+    if (relatedTenancyId) unitTenancyIds.add(relatedTenancyId);
+  }
+  const currentTenant = details?.tenantName || stringValue(nested(tenancy ?? {}, "tenant", "legalName"), "");
+  const unitPropertyType = stringValue(property.type, "Rental unit")
+    .replaceAll("_", " ")
+    .toLowerCase()
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+  const unitBedroomCount = stringValue(unit?.bedrooms, "");
+  const unitBathroomCount = stringValue(unit?.bathrooms, "");
+  const unitArea = stringValue(unit?.sizeSqm, "");
+  const unitOccupancyStatus = details?.activeTenancy
+    ? "Occupied"
+    : details?.upcomingTenancy
+      ? "Upcoming"
+      : "Vacant";
+  const unitHeaderSubtitle = [
+    stringValue(property.address, ""),
+    [
+      unitBedroomCount && unitBedroomCount !== "0" ? `${unitBedroomCount}BR` : "",
+      unitPropertyType,
+      unitBathroomCount && unitBathroomCount !== "0" ? `${unitBathroomCount} bath` : "",
+      unitArea ? `${unitArea} m²` : "",
+    ].filter(Boolean).join(" · "),
+  ].filter(Boolean).join(" · ");
+  const rentTenantName = stringValue(nested(rentTenancy ?? {}, "tenant", "legalName"), currentTenant);
+  const rentPropertyName = stringValue(
+    nested(rentTenancy ?? {}, "property", "name") ??
+      nested(rentTenancy ?? {}, "unit", "property", "name"),
+    stringValue(property.name),
+  );
+  const rentUnitName = stringValue(nested(rentTenancy ?? {}, "unit", "unitNumber"), stringValue(unit?.unitNumber, "Rental space"));
+  const rentMonthlyRate = nested(rentTenancy ?? {}, "leases", "0", "rentAmount") ??
+    (rentTenancy && stringValue(rentTenancy.id, "") === stringValue(details?.activeTenancy?.id, "")
+      ? details?.rentAmount
+      : nested(rentTenancy ?? {}, "unit", "rentAmount"));
+  const allCharges = tenancyId
+    ? rowsFor(data, "charges").filter(
+        (row) =>
+          stringValue(nested(row, "tenancy", "id"), "") === tenancyId &&
+          row.status !== "VOID",
+      )
+    : [];
+  const unitLedgerCharges = rowsFor(data, "charges").filter(
+    (row) =>
+      unitTenancyIds.has(stringValue(nested(row, "tenancy", "id"), "")) &&
+      row.status !== "VOID",
+  );
+  const unitOpenBalance = unitLedgerCharges.reduce(
+    (total, charge) => {
+      const balance = amountMinorUnits(charge.balance);
+      return total + (balance > BigInt(0) ? balance : BigInt(0));
+    },
+    BigInt(0),
+  );
+  const openCharges = allCharges
+    .filter((row) => amountMinorUnits(row.balance) > BigInt(0))
+    .sort((left, right) =>
+      stringValue(left.dueDate, "").localeCompare(stringValue(right.dueDate, "")) ||
+      stringValue(left.period, "").localeCompare(stringValue(right.period, "")),
+    );
+  const totalOpenBalance = openCharges.reduce(
+    (sum, row) => sum + amountMinorUnits(row.balance),
+    BigInt(0),
+  );
+  const receivedAmount = tryAmountMinorUnits(rentForm.amount);
+  const rentAllocations = receivedAmount === null ? [] : allocateRent(openCharges, receivedAmount, currency);
+  const allocatedAmount = rentAllocations.reduce(
+    (sum, allocation) => sum + amountMinorUnits(allocation.amount),
+    BigInt(0),
+  );
+  const balanceAfterPayment = totalOpenBalance > allocatedAmount
+    ? totalOpenBalance - allocatedAmount
+    : BigInt(0);
+  const advanceCredit = receivedAmount !== null && receivedAmount > allocatedAmount
+    ? receivedAmount - allocatedAmount
+    : BigInt(0);
+  const unitLeases = rowsFor(data, "leases")
+    .filter((row) => unitTenancyIds.has(stringValue(nested(row, "tenancy", "id"), "")))
+    .sort((left, right) =>
+      stringValue(right.startDate, "").localeCompare(stringValue(left.startDate, "")),
+    );
+  const unitDeposits = rowsFor(data, "deposits").filter(
+    (row) => unitTenancyIds.has(stringValue(nested(row, "tenancy", "id"), "")),
+  );
+  const unitPayments = rowsFor(data, "payments").filter((row) => {
+    const directTenancyId = stringValue(nested(row, "tenancy", "id"), "");
+    return (
+      (directTenancyId && unitTenancyIds.has(directTenancyId)) ||
+      rowsFor(row, "allocations").some((allocation) => {
+        const allocationTenancyId = stringValue(
+          nested(allocation, "rentCharge", "tenancy", "id"),
+          "",
+        );
+        return allocationTenancyId !== "" && unitTenancyIds.has(allocationTenancyId);
+      })
+    );
+  });
+  const currentUnitDeposit = unitDeposits.find(
+    (deposit) => stringValue(nested(deposit, "tenancy", "id"), "") === tenancyId,
+  );
+  const totalUnitDepositHeld = unitDeposits.length
+    ? unitDeposits.reduce((total, deposit) => total + amountMinorUnits(deposit.heldBalance), BigInt(0))
+    : details?.depositHeld;
+  const ledgerHistory: Array<{
+    id: string;
+    kind: "payment" | "charge" | "deposit";
+    date: string;
+    title: string;
+    details: string;
+    amount: unknown;
+    record: ValueRecord;
+  }> = [
+    ...unitPayments.map((payment) => {
+      const periods = rowsFor(payment, "allocations")
+        .map((allocation) => stringValue(nested(allocation, "rentCharge", "period"), ""))
+        .filter(Boolean);
+      const title = periods.length
+        ? `${rentPeriodLabel(periods[0])} Rent`
+        : stringValue(payment.note, "Rent payment");
+      const details = [
+        stringValue(payment.receivedAt, "").slice(0, 10),
+        stringValue(payment.method, "").replaceAll("_", " "),
+        stringValue(payment.reference, "MANUAL-ENTRY"),
+      ].filter(Boolean).join(" · ");
+      return {
+        id: `payment-${stringValue(payment.id, "")}`,
+        kind: "payment" as const,
+        date: stringValue(payment.receivedAt, "").slice(0, 10),
+        title,
+        details,
+        amount: payment.amount,
+        record: payment,
+      };
+    }),
+    ...unitLedgerCharges.map((charge) => ({
+      id: `charge-${stringValue(charge.id, "")}`,
+      kind: "charge" as const,
+      date: stringValue(charge.dueDate, "").slice(0, 10),
+      title: `${rentPeriodLabel(charge.period)} Rent Charge`,
+      details: `Due ${dateLabel(charge.dueDate)} · ${stringValue(charge.status, "").replaceAll("_", " ")} · Balance ${formatAmount(charge.balance, currency)}`,
+      amount: charge.amount,
+      record: charge,
+    })),
+    ...unitDeposits.flatMap((deposit) =>
+      rowsFor(deposit, "transactions").map((transaction) => {
+        const type = stringValue(transaction.type, "ADJUSTMENT");
+        const title = type === "RECEIPT"
+          ? "Deposit received"
+          : type === "REFUND"
+            ? "Deposit refunded"
+            : type === "DEDUCTION"
+              ? "Deposit deduction"
+              : "Deposit adjustment";
+        const reason = stringValue(transaction.reason, "");
+        return {
+          id: `deposit-${stringValue(transaction.id, "")}`,
+          kind: "deposit" as const,
+          date: stringValue(transaction.date, "").slice(0, 10),
+          title,
+          details: [dateLabel(transaction.date), reason].filter(Boolean).join(" · "),
+          amount: transaction.amount,
+          record: transaction,
+        };
+      }),
+    ),
+  ].sort((left, right) => right.date.localeCompare(left.date));
+  const filteredLedgerHistory = ledgerHistory.filter((entry) => {
+    const searchText = `${entry.title} ${entry.details} ${formatAmount(entry.amount, currency)}`.toLowerCase();
+    const entryDate = entry.date.slice(0, 10);
+    return (
+      (ledgerTypeFilter === "all" || entry.kind === ledgerTypeFilter) &&
+      (!ledgerFromDate || entryDate >= ledgerFromDate) &&
+      (!ledgerToDate || entryDate <= ledgerToDate) &&
+      (!ledgerSearch.trim() || searchText.includes(ledgerSearch.trim().toLowerCase()))
+    );
+  });
+  const unitRepairs = rowsFor(data, "requests").filter(
+    (row) => stringValue(nested(row, "unit", "id"), "") === unitId,
+  );
+  const unitInspections = rowsFor(data, "inspections").filter(
+    (row) => stringValue(nested(row, "unit", "id"), "") === unitId,
+  );
+  function selectRentTenancy(value: string) {
+    setSelectedRentTenancyId(value);
+    const balance = rowsFor(data, "charges")
+      .filter(
+        (charge) =>
+          stringValue(nested(charge, "tenancy", "id"), "") === value &&
+          charge.status !== "VOID" &&
+          amountMinorUnits(charge.balance) > BigInt(0),
+      )
+      .reduce((sum, charge) => sum + amountMinorUnits(charge.balance), BigInt(0));
+    setRentForm((current) => ({
+      ...current,
+      amount: minorUnitsInput(balance, currency),
+    }));
+  }
+
+  function updateUnitField(index: number, name: keyof UnitBatchDraft, value: string) {
+    setUnitRows((current) =>
+      current.map((row, rowIndex) => rowIndex === index ? { ...row, [name]: value } : row),
+    );
+  }
+
+  function selectPaymentProof(file: File | null) {
+    setError(null);
+    if (file && file.size > 20 * 1024 * 1024) {
+      setError("Payment proof must be 20 MB or smaller.");
+      return;
+    }
+    if (
+      file &&
+      !['application/pdf', 'image/jpeg', 'image/png', 'image/webp'].includes(file.type)
+    ) {
+      setError("Attach a PDF, JPEG, PNG, or WebP receipt or screenshot.");
+      return;
+    }
+    setProofFile(file);
+    setUploadedProofFileId(null);
+    if (proofFileInputRef.current) proofFileInputRef.current.value = "";
+  }
+
+  async function submitBatchUnits(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setSaving(true);
+    setError(null);
+    try {
+      const units = unitRows.map((row, index) => {
+        if (!row.unitNumber.trim() || !row.rentAmount.trim() || !row.depositAmount.trim()) {
+          throw new Error(`Complete the unit number, rent and deposit for Unit ${index + 1}.`);
+        }
+        return {
+          unitNumber: row.unitNumber.trim(),
+          rentAmount: row.rentAmount.trim(),
+          depositAmount: row.depositAmount.trim(),
+          ...(row.floor.trim() ? { floor: row.floor.trim() } : {}),
+          ...(row.bedrooms ? { bedrooms: Number(row.bedrooms) } : {}),
+          ...(row.bathrooms ? { bathrooms: Number(row.bathrooms) } : {}),
+        };
+      });
+      await apiRequest(`${base}/properties/${action.propertyId}/units/batch`, {
+        method: "POST",
+        body: JSON.stringify({ units }),
+      });
+      onComplete(`${units.length} ${units.length === 1 ? "unit" : "units"} added to ${stringValue(property.name)}.`);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Units could not be added.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function submitRent(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (rentStep === 0) {
+      if (
+        receivedAmount === null ||
+        receivedAmount <= BigInt(0) ||
+        !rentForm.method ||
+        !rentForm.receivedAt
+      ) {
+        setError("Enter a positive amount, payment channel and received date.");
+        return;
+      }
+      if (currency === "RWF" && receivedAmount % BigInt(100) !== BigInt(0)) {
+        setError("RWF payments must be entered as whole francs.");
+        return;
+      }
+      setError(null);
+      setRentStep(1);
+      return;
+    }
+    if (receivedAmount === null || !rentTenancy) {
+      setError("An active tenancy and a valid payment amount are required.");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const proofFileId = proofFile
+        ? uploadedProofFileId ?? await onUploadFile(proofFile)
+        : undefined;
+      if (proofFileId) setUploadedProofFileId(proofFileId);
+      const result = await apiRequest<{ payment: { id: string } }>(`${base}/rent/payments`, {
+        method: "POST",
+        body: JSON.stringify({
+          tenantId: stringValue(nested(rentTenancy, "tenant", "id"), ""),
+          tenancyId: stringValue(rentTenancy.id, ""),
+          allocationStrategy: "FIFO",
+          amount: rentForm.amount,
+          method: rentForm.method,
+          ...(rentForm.reference.trim() ? { reference: rentForm.reference.trim() } : {}),
+          ...(rentForm.note.trim() ? { note: rentForm.note.trim() } : {}),
+          receivedAt: `${rentForm.receivedAt}T00:00:00.000Z`,
+          allocations: rentAllocations,
+          ...(proofFileId ? { proofFileId } : {}),
+        }),
+      });
+      onComplete("Rent payment recorded and tagged User Recorded.", result.payment.id);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Payment could not be recorded.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function reversePayment(paymentId: string) {
+    if (!reversalReason.trim()) {
+      setError("Enter a reason to create an audit-safe payment reversal.");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      await apiRequest(`${base}/rent/payments/${paymentId}/reverse`, {
+        method: "POST",
+        body: JSON.stringify({ reason: reversalReason.trim() }),
+      });
+      setReversalPaymentId(null);
+      setReversalReason("");
+      onRefresh();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Payment could not be reversed.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleCompleteTicket(requestId: string) {
+    setRepairSavingId(requestId);
+    setError(null);
+    try {
+      const result = await apiRequest<{ request: ValueRecord }>(`${base}/maintenance/${requestId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ status: "COMPLETED" }),
+      });
+      onTicketCompleted(result.request ?? { id: requestId, status: "COMPLETED" });
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Repair could not be completed.");
+    } finally {
+      setRepairSavingId(null);
+    }
+  }
+
+  const title = action.type === "add-unit"
+    ? "Add units"
+    : action.type === "manage-property"
+      ? "Manage property"
+    : action.type === "assign"
+      ? "Assign tenant"
+      : action.type === "rent"
+        ? "Record Rent Payment"
+        : "Manage unit";
+  const subtitle = action.type === "rent"
+    ? "User Recorded · not independently verified by a bank or payment provider."
+    : `${stringValue(property.name)}${unit ? ` · Unit ${stringValue(unit.unitNumber)}` : ""}`;
+
+  return (
+    <div
+      className="landlord-form-modal-backdrop property-setup-backdrop property-create-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !saving && !unitEditSaving) onClose();
+      }}
+    >
+      <section
+        className={`landlord-form-modal property-setup-drawer property-action-drawer${action.type === "rent" ? " rent-payment-drawer" : action.type === "manage" ? " unit-manage-drawer" : action.type === "manage-property" ? " property-manage-drawer" : " property-form-drawer"}`}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="property-action-drawer-title"
+      >
+        {action.type === "rent" ? (
+          <>
+            <div className="rent-payment-header">
+              <div>
+                <h2 id="property-action-drawer-title">
+                  Record Rent Payment
+                  <span className="rent-payment-user-recorded">User Recorded</span>
+                </h2>
+                <p>Step {rentStep + 1} of 2 · Manual payment entry &amp; automatic {currency} allocation</p>
+              </div>
+              <button
+                className="rent-payment-close"
+                type="button"
+                aria-label="Close drawer"
+                onClick={onClose}
+                disabled={saving}
+              >
+                <X size={17} />
+              </button>
+            </div>
+            <ol className="rent-payment-steps" aria-label="Payment steps">
+              <li className={rentStep === 0 ? "is-current" : "is-complete"} aria-current={rentStep === 0 ? "step" : undefined}>
+                <span>1.</span> Payment Details
+              </li>
+              <ChevronRight size={14} aria-hidden="true" />
+              <li className={rentStep === 1 ? "is-current" : ""} aria-current={rentStep === 1 ? "step" : undefined}>
+                <span>2.</span> Verify Allocation &amp; Receipt
+              </li>
+            </ol>
+          </>
+        ) : action.type === "manage-property" ? (
+          <div className="property-manage-header">
+            <div className="property-manage-heading">
+              <h2 id="property-action-drawer-title">
+                {stringValue(property.name, "Property")}
+                <span>{unitPropertyType}</span>
+                <span className={`property-manage-status is-${stringValue(property.status, "ACTIVE").toLowerCase()}`}>
+                  <i aria-hidden="true" />
+                  {stringValue(property.status, "ACTIVE").replaceAll("_", " ")}
+                </span>
+              </h2>
+              <p>
+                {stringValue(property.address, "Location not provided")}
+                {" · "}
+                {propertyUnits.filter((row) => row.status !== "ARCHIVED").length} rental units
+              </p>
+            </div>
+            <div className="unit-manage-header-actions">
+              <button
+                type="button"
+                className={`unit-manage-notifications${tab === "notifications" ? " is-active" : ""}`}
+                aria-label={`Notifications${attentionItems.length ? ` (${attentionItems.length})` : ""}`}
+                aria-pressed={tab === "notifications"}
+                onClick={() => setTab(tab === "notifications" ? "overview" : "notifications")}
+              >
+                <BellRing size={16} />
+                {attentionItems.length > 0 && <span>{attentionItems.length}</span>}
+              </button>
+              <button
+                className="unit-manage-close"
+                type="button"
+                aria-label="Close drawer"
+                onClick={onClose}
+                disabled={saving}
+              >
+                <X size={18} />
+              </button>
+            </div>
+          </div>
+        ) : action.type === "manage" && unit ? (
+          <div className="unit-manage-header">
+            <div className="unit-manage-heading">
+              <h2 id="property-action-drawer-title">
+                Unit {stringValue(unit.unitNumber, "Rental space")}
+                <span>{stringValue(property.name, "Property")}</span>
+                <span className={`unit-manage-status is-${unitOccupancyStatus.toLowerCase()}`}>
+                  <i aria-hidden="true" />
+                  {unitOccupancyStatus} unit
+                </span>
+              </h2>
+              <p>{unitHeaderSubtitle}</p>
+            </div>
+            <div className="unit-manage-header-actions">
+              {tab !== "ledger" && (
+                <button
+                  type="button"
+                  className={`unit-manage-notifications${tab === "notifications" ? " is-active" : ""}`}
+                  aria-label={`Notifications${attentionItems.length ? ` (${attentionItems.length})` : ""}`}
+                  aria-pressed={tab === "notifications"}
+                  onClick={() => setTab(tab === "notifications" ? "overview" : "notifications")}
+                >
+                  <BellRing size={17} />
+                  {attentionItems.length > 0 && <span>{attentionItems.length}</span>}
+                </button>
+              )}
+              <button
+                className="unit-manage-close"
+                type="button"
+                aria-label="Close drawer"
+                onClick={onClose}
+                disabled={saving || unitEditSaving}
+              >
+                <X size={19} />
+              </button>
+            </div>
+          </div>
+        ) : (
+        <div className="rent-payment-header property-action-drawer-header">
+          <div>
+            <h2 id="property-action-drawer-title">{title}</h2>
+            <p>{subtitle}</p>
+          </div>
+          <button className="rent-payment-close" type="button" aria-label="Close drawer" onClick={onClose} disabled={saving || unitEditSaving}>
+            <X size={19} />
+          </button>
+        </div>
+        )}
+
+        {action.type === "add-unit" && (
+          <form className="property-action-form" onSubmit={(event) => void submitBatchUnits(event)}>
+            <div className="property-setup-content">
+              <p className="property-setup-intro">The parent building is locked. Add one or more units; the full batch is created together.</p>
+              <div className="property-setup-unit-list">
+                {unitRows.map((row, index) => (
+                  <fieldset className="property-setup-unit" key={`new-unit-${index}`}>
+                    <legend>Unit {index + 1}</legend>
+                    <div className="landlord-form-grid">
+                      <label className="landlord-field"><span>Unit name / number</span><input required value={row.unitNumber} onChange={(event) => updateUnitField(index, "unitNumber", event.target.value)} placeholder="e.g. Unit B3" /></label>
+                      <label className="landlord-field"><span>Floor</span><input value={row.floor} onChange={(event) => updateUnitField(index, "floor", event.target.value)} placeholder="Optional" /></label>
+                      <label className="landlord-field"><span>Monthly rent ({currency})</span><input required inputMode="decimal" step={currency === "RWF" ? "1" : "0.01"} value={row.rentAmount} onChange={(event) => updateUnitField(index, "rentAmount", event.target.value)} /></label>
+                      <label className="landlord-field"><span>Security deposit ({currency})</span><input required inputMode="decimal" step={currency === "RWF" ? "1" : "0.01"} value={row.depositAmount} onChange={(event) => updateUnitField(index, "depositAmount", event.target.value)} /></label>
+                      <label className="landlord-field"><span>Bedrooms</span><input type="number" min="0" max="100" value={row.bedrooms} onChange={(event) => updateUnitField(index, "bedrooms", event.target.value)} /></label>
+                      <label className="landlord-field"><span>Bathrooms</span><input type="number" min="0" max="100" value={row.bathrooms} onChange={(event) => updateUnitField(index, "bathrooms", event.target.value)} /></label>
+                    </div>
+                    {unitRows.length > 1 && <button className="property-setup-remove-unit" type="button" onClick={() => setUnitRows((rows) => rows.filter((_, rowIndex) => rowIndex !== index))}><Trash2 size={13} /> Remove unit</button>}
+                  </fieldset>
+                ))}
+              </div>
+              <button
+                className="property-setup-add-unit"
+                type="button"
+                onClick={() => setUnitRows((rows) => [...rows, {
+                  unitNumber: "",
+                  floor: "",
+                  rentAmount: String(templateUnit?.rentAmount ?? ""),
+                  depositAmount: String(templateUnit?.depositAmount ?? "0"),
+                  bedrooms: "",
+                  bathrooms: "",
+                }])}
+              >
+                <Plus size={14} /> Add another unit
+              </button>
+            </div>
+            {error && <p className="property-onboarding-error" role="alert">{error}</p>}
+            <footer className="landlord-form-actions">
+              <button className="landlord-form-cancel-button" type="button" onClick={onClose} disabled={saving}>Cancel</button>
+              <button className="dashboard-primary-button" type="submit" disabled={saving}>{saving ? "Adding…" : "Add units"}</button>
+            </footer>
+          </form>
+        )}
+
+        {action.type === "rent" && details && (
+          <form className="property-action-form rent-payment-form" onSubmit={(event) => void submitRent(event)}>
+            {rentStep === 0 ? (
+              <div className="property-setup-content rent-payment-step-content">
+                {!rentTenancies.length && (
+                  <p className="rent-payment-no-tenancy" role="status">
+                    This unit has no active tenancy. You can review the rent form, but a tenant must be assigned before a payment can be recorded.
+                  </p>
+                )}
+                <label className="rent-payment-field">
+                  <span>Property / Unit &amp; Tenant</span>
+                  <span className="rent-payment-select-wrap">
+                    <select
+                      aria-label="Property, unit and tenant"
+                      value={stringValue(rentTenancy?.id, "")}
+                      disabled={!rentTenancies.length || saving}
+                      onChange={(event) => selectRentTenancy(event.target.value)}
+                    >
+                      {!rentTenancies.length && <option value="">No active tenancy</option>}
+                      {rentTenancies.map((option) => {
+                        const optionId = stringValue(option.id, "");
+                        const optionBalance = rowsFor(data, "charges")
+                          .filter(
+                            (charge) =>
+                              stringValue(nested(charge, "tenancy", "id"), "") === optionId &&
+                              charge.status !== "VOID" &&
+                              amountMinorUnits(charge.balance) > BigInt(0),
+                          )
+                          .reduce((sum, charge) => sum + amountMinorUnits(charge.balance), BigInt(0));
+                        const optionProperty = stringValue(
+                          nested(option, "property", "name") ??
+                            nested(option, "unit", "property", "name"),
+                          "Property",
+                        );
+                        const optionUnit = stringValue(nested(option, "unit", "unitNumber"), "Rental space");
+                        const optionTenant = stringValue(nested(option, "tenant", "legalName"), "Tenant");
+                        return (
+                          <option key={optionId} value={optionId}>
+                            {optionProperty} — {optionUnit} — {optionTenant} [Due: {formatAmount(optionBalance, currency)}]
+                          </option>
+                        );
+                      })}
+                    </select>
+                    <ChevronDown size={16} aria-hidden="true" />
+                  </span>
+                </label>
+                <section className="rent-payment-balance-card" aria-label="Current rent balance and monthly rate">
+                  <div>
+                    <span>Current Open Balance</span>
+                    <strong>{formatAmount(totalOpenBalance, currency)}</strong>
+                  </div>
+                  <div>
+                    <span>Monthly Rate</span>
+                    <strong>{formatAmount(rentMonthlyRate, currency)}</strong>
+                  </div>
+                </section>
+                <label className="rent-payment-field rent-payment-amount-field">
+                  <span>Amount Received ({currency})</span>
+                  <input
+                    required
+                    autoFocus
+                    type="number"
+                    min={currency === "RWF" ? "1" : "0.01"}
+                    inputMode="decimal"
+                    step={currency === "RWF" ? "1" : "0.01"}
+                    value={rentForm.amount}
+                    onChange={(event) => setRentForm((current) => ({ ...current, amount: event.target.value }))}
+                  />
+                </label>
+                <fieldset className="rent-payment-method-field">
+                  <legend>Payment Channel</legend>
+                  <div role="group" aria-label="Payment channel" className="rent-payment-methods">
+                    <button type="button" aria-pressed={rentForm.method === "MTN_MOMO"} className={rentForm.method === "MTN_MOMO" ? "is-selected" : ""} onClick={() => setRentForm((current) => ({ ...current, method: "MTN_MOMO" }))} disabled={saving}>
+                      <Smartphone size={15} aria-hidden="true" /><span>MTN MoMo</span>
+                    </button>
+                    <button type="button" aria-pressed={rentForm.method === "AIRTEL_MONEY"} className={rentForm.method === "AIRTEL_MONEY" ? "is-selected" : ""} onClick={() => setRentForm((current) => ({ ...current, method: "AIRTEL_MONEY" }))} disabled={saving}>
+                      <Smartphone size={15} aria-hidden="true" /><span>Airtel Money</span>
+                    </button>
+                    <button type="button" aria-pressed={rentForm.method === "BANK_TRANSFER"} className={rentForm.method === "BANK_TRANSFER" ? "is-selected" : ""} onClick={() => setRentForm((current) => ({ ...current, method: "BANK_TRANSFER" }))} disabled={saving}>
+                      <Landmark size={15} aria-hidden="true" /><span>Bank Transfer</span>
+                    </button>
+                    <button type="button" aria-pressed={rentForm.method === "CASH"} className={rentForm.method === "CASH" ? "is-selected" : ""} onClick={() => setRentForm((current) => ({ ...current, method: "CASH" }))} disabled={saving}>
+                      <Banknote size={15} aria-hidden="true" /><span>Cash</span>
+                    </button>
+                  </div>
+                </fieldset>
+                <div className="rent-payment-inline-fields">
+                  <label className="rent-payment-field">
+                    <span>Transaction Reference</span>
+                    <input maxLength={160} value={rentForm.reference} onChange={(event) => setRentForm((current) => ({ ...current, reference: event.target.value }))} />
+                  </label>
+                  <label className="rent-payment-field">
+                    <span>Date Received</span>
+                    <input required type="date" value={rentForm.receivedAt} onChange={(event) => setRentForm((current) => ({ ...current, receivedAt: event.target.value }))} />
+                  </label>
+                </div>
+                <label className="rent-payment-field">
+                  <span>Charge Period Note</span>
+                  <input
+                    maxLength={240}
+                    value={rentForm.note}
+                    onChange={(event) => setRentForm((current) => ({ ...current, note: event.target.value }))}
+                  />
+                </label>
+                <div className="rent-payment-proof">
+                  <input
+                    ref={proofFileInputRef}
+                    type="file"
+                    accept="application/pdf,image/jpeg,image/png,image/webp"
+                    aria-label="Attach payment receipt or screenshot"
+                    onChange={(event) => selectPaymentProof(event.currentTarget.files?.[0] ?? null)}
+                  />
+                  <button type="button" className="rent-payment-attach-button" onClick={() => proofFileInputRef.current?.click()} disabled={saving}>
+                    + Attach receipt/screenshot
+                  </button>
+                  {proofFile && (
+                    <span>
+                      {proofFile.name} · {(proofFile.size / 1024 / 1024).toFixed(1)} MB
+                      <button type="button" onClick={() => selectPaymentProof(null)} disabled={saving}>Remove</button>
+                    </span>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="property-setup-content rent-payment-review-content">
+                <section className="rent-payment-verification-card" aria-label="Payment allocation summary">
+                  <div>
+                    <span>Tenant</span>
+                    <strong>{rentTenantName || "Tenant"}</strong>
+                  </div>
+                  <div>
+                    <span>Amount Recorded</span>
+                    <strong className="is-amount-recorded">
+                      {receivedAmount === null ? "—" : formatAmount(receivedAmount, currency)}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Channel &amp; Ref</span>
+                    <strong>
+                      {rentForm.method === "MTN_MOMO"
+                        ? "MTN MoMo"
+                        : rentForm.method === "AIRTEL_MONEY"
+                          ? "Airtel Money"
+                          : rentForm.method === "BANK_TRANSFER"
+                            ? "Bank Transfer"
+                            : "Cash"}
+                      {" · "}
+                      {rentForm.reference.trim() || "MANUAL-ENTRY"}
+                    </strong>
+                  </div>
+                  <div>
+                    <span>Remaining Rent Due</span>
+                    <strong>{formatAmount(balanceAfterPayment, currency)}</strong>
+                  </div>
+                </section>
+                <section className="rent-payment-audit-notice" aria-label="Audit and verification notice">
+                  <strong>Audit &amp; Verification Notice</strong>
+                  <p>
+                    This receipt is tagged as <b>User Recorded</b> (confirmed manually by you, not an automated bank gateway feed).
+                  </p>
+                  {proofFile && <small>Supporting proof attached: {proofFile.name}</small>}
+                </section>
+                <details className="rent-payment-allocation-details">
+                  <summary>View oldest-first allocation details</summary>
+                  <div className="rent-payment-allocation-preview">
+                    <h4>Automatic FIFO allocation</h4>
+                    {rentAllocations.length ? rentAllocations.map((allocation) => {
+                      const charge = openCharges.find((row) => stringValue(row.id, "") === allocation.rentChargeId);
+                      if (!charge) return null;
+                      const remaining = amountMinorUnits(charge.balance) - amountMinorUnits(allocation.amount);
+                      const status = remaining === BigInt(0)
+                        ? "PAID"
+                        : charge.status === "OVERDUE"
+                          ? "OVERDUE · PARTIAL"
+                          : "PARTIAL";
+                      return (
+                        <div className="rent-payment-charge-row" key={allocation.rentChargeId}>
+                          <span>
+                            <strong>{rentPeriodLabel(charge.period)}</strong>
+                            <small>{formatAmount(allocation.amount, currency)} allocated · {status}</small>
+                          </span>
+                          <b>{remaining === BigInt(0) ? "Settled" : `${formatAmount(remaining, currency)} remaining`}</b>
+                        </div>
+                      );
+                    }) : (
+                      <p className="property-action-empty">There are no unpaid rent charges to allocate this payment to.</p>
+                    )}
+                    {advanceCredit > BigInt(0) && (
+                      <div className="rent-payment-advance-credit">
+                        <span>Unapplied advance credit</span>
+                        <strong>{formatAmount(advanceCredit, currency)}</strong>
+                        <small>This credit will be applied to the tenant’s next rent charge.</small>
+                      </div>
+                    )}
+                  </div>
+                </details>
+                <details className="rent-payment-entry-details">
+                  <summary>View payment entry details</summary>
+                  <dl>
+                    <div><dt>Property / unit</dt><dd>{rentPropertyName} — {rentUnitName}</dd></div>
+                    <div><dt>Date received</dt><dd>{dateLabel(rentForm.receivedAt)}</dd></div>
+                    <div><dt>Charge period note</dt><dd>{rentForm.note || "Not provided"}</dd></div>
+                  </dl>
+                </details>
+              </div>
+            )}
+            {error && <p className="property-onboarding-error" role="alert">{error}</p>}
+            <footer className="landlord-form-actions rent-payment-actions">
+              {rentStep === 1 ? (
+                <button className="dashboard-secondary-button" type="button" onClick={() => setRentStep(0)} disabled={saving}>← Back</button>
+              ) : (
+                <button className="landlord-form-cancel-button" type="button" onClick={onClose} disabled={saving}>Cancel</button>
+              )}
+              <button className="dashboard-primary-button" type="submit" disabled={saving || !rentTenancy}>
+                {saving
+                  ? "Recording…"
+                  : rentStep === 0
+                    ? "Review Allocation →"
+                    : <><Check size={13} aria-hidden="true" /> Confirm &amp; Generate Receipt</>}
+              </button>
+            </footer>
+          </form>
+        )}
+
+        {action.type === "manage-property" && (
+          <div className="property-action-manager property-manage-layout">
+            <div className="property-action-tabs property-manage-tabs" role="tablist" aria-label="Property management">
+              <button type="button" role="tab" aria-selected={tab === "overview"} className={tab === "overview" ? "is-active" : ""} onClick={() => setTab("overview")}>Overview</button>
+              <button type="button" role="tab" aria-selected={tab === "notifications"} className={tab === "notifications" ? "is-active" : ""} onClick={() => setTab("notifications")}>Notifications ({attentionItems.length})</button>
+            </div>
+            <div className="property-action-manager-content property-manage-content">
+              {tab === "overview" && (
+                <div className="unit-overview">
+                  <section className="unit-overview-card property-manage-summary">
+                    <header>
+                      <h3><i className="is-indigo" /> Property Specifications</h3>
+                      <button type="button" onClick={onEditProperty} disabled={!canEdit}>
+                        <Pencil size={13} /> Edit Details
+                      </button>
+                    </header>
+                    <div className="unit-spec-grid">
+                      <div className="unit-spec-item">
+                        <span className="unit-spec-icon is-blue"><Building2 size={18} /></span>
+                        <span><small>Property Type</small><strong>{unitPropertyType}</strong></span>
+                      </div>
+                      <div className="unit-spec-item">
+                        <span className="unit-spec-icon is-indigo"><MapPin size={18} /></span>
+                        <span><small>Location</small><strong>{stringValue(property.address, "Not provided")}</strong></span>
+                      </div>
+                      <div className="unit-spec-item">
+                        <span className="unit-spec-icon is-teal"><CircleAlert size={18} /></span>
+                        <span><small>Status</small><strong>{stringValue(property.status, "ACTIVE").replaceAll("_", " ")}</strong></span>
+                      </div>
+                      <div className="unit-spec-item">
+                        <span className="unit-spec-icon is-green"><Home size={18} /></span>
+                        <span>
+                          <small>Rental Units</small>
+                          <strong>{propertyUnits.filter((row) => row.status !== "ARCHIVED").length}</strong>
+                        </span>
+                      </div>
+                    </div>
+                  </section>
+                </div>
+              )}
+              {tab === "notifications" && (
+                <PropertyNotificationPanel
+                  items={attentionItems}
+                  readError={attentionReadError}
+                  scope="property"
+                  onOpen={onAttentionOpen}
+                />
+              )}
+            </div>
+            <footer className="property-manage-footer">
+              <button type="button" className="unit-manage-footer-close" onClick={onClose}>Close</button>
+            </footer>
+          </div>
+        )}
+
+        {action.type === "manage" && unit && details && (
+          <div className="property-action-manager unit-management-layout">
+            <div className="property-action-tabs unit-manage-tabs" role="tablist" aria-label="Unit management">
+              <button type="button" role="tab" aria-selected={tab === "overview"} className={tab === "overview" ? "is-active" : ""} onClick={() => setTab("overview")}>Overview &amp; Lease</button>
+              <button type="button" role="tab" aria-selected={tab === "ledger"} className={tab === "ledger" ? "is-active" : ""} onClick={() => setTab("ledger")}>Rent Ledger &amp; Deposit</button>
+              <button type="button" role="tab" aria-selected={tab === "repairs"} className={tab === "repairs" ? "is-active" : ""} onClick={() => setTab("repairs")}>Inspection &amp; Repairs</button>
+            </div>
+            <div className="property-action-manager-content">
+              {tab === "notifications" && (
+                <PropertyNotificationPanel
+                  items={attentionItems}
+                  readError={attentionReadError}
+                  scope="unit"
+                  onOpen={onAttentionOpen}
+                />
+              )}
+              {tab === "overview" && (
+                unitEditOpen ? (
+                  <form className="property-action-form unit-edit-form" onSubmit={(event) => void saveUnitDetails(event)}>
+                    <div className="property-setup-content">
+                      <h3>{isHouse ? "Edit house details" : "Edit rental unit"}</h3>
+                      {hasLease && (
+                        <p className="property-action-empty">
+                          Rent and deposit are locked while an active or upcoming lease is in place. Physical details remain editable.
+                        </p>
+                      )}
+                      <div className="landlord-form-grid">
+                        {!isHouse && (
+                          <>
+                            <label className="landlord-field">
+                              <span>Unit name / number</span>
+                              <input
+                                required
+                                maxLength={80}
+                                value={unitEditForm.unitNumber}
+                                onChange={(event) => setUnitEditForm((current) => ({ ...current, unitNumber: event.target.value }))}
+                              />
+                            </label>
+                            <label className="landlord-field">
+                              <span>Floor</span>
+                              <input
+                                maxLength={40}
+                                value={unitEditForm.floor}
+                                onChange={(event) => setUnitEditForm((current) => ({ ...current, floor: event.target.value }))}
+                              />
+                            </label>
+                          </>
+                        )}
+                        {!isCommercial && (
+                          <>
+                            <label className="landlord-field">
+                              <span>Bedrooms{isHouse ? " *" : ""}</span>
+                              <input
+                                required={isHouse}
+                                type="number"
+                                min="0"
+                                max="100"
+                                step="1"
+                                value={unitEditForm.bedrooms}
+                                onChange={(event) => setUnitEditForm((current) => ({ ...current, bedrooms: event.target.value }))}
+                              />
+                            </label>
+                            <label className="landlord-field">
+                              <span>Bathrooms{isHouse ? " *" : ""}</span>
+                              <input
+                                required={isHouse}
+                                type="number"
+                                min="0"
+                                max="100"
+                                step="1"
+                                value={unitEditForm.bathrooms}
+                                onChange={(event) => setUnitEditForm((current) => ({ ...current, bathrooms: event.target.value }))}
+                              />
+                            </label>
+                          </>
+                        )}
+                        <label className="landlord-field">
+                          <span>Area (m²){isHouse ? " *" : ""}</span>
+                          <input
+                            required={isHouse}
+                            type="number"
+                            min="0.01"
+                            step="0.01"
+                            value={unitEditForm.sizeSqm}
+                            onChange={(event) => setUnitEditForm((current) => ({ ...current, sizeSqm: event.target.value }))}
+                          />
+                        </label>
+                        {!hasLease && (
+                          <>
+                            <label className="landlord-field">
+                              <span>Monthly asking rent ({currency})</span>
+                              <input
+                                required
+                                type="number"
+                                min={currency === "RWF" ? "1" : "0.01"}
+                                step={currency === "RWF" ? "1" : "0.01"}
+                                value={unitEditForm.rentAmount}
+                                onChange={(event) => setUnitEditForm((current) => ({ ...current, rentAmount: event.target.value }))}
+                              />
+                            </label>
+                            <label className="landlord-field">
+                              <span>Required deposit ({currency})</span>
+                              <input
+                                required
+                                type="number"
+                                min="0"
+                                step={currency === "RWF" ? "1" : "0.01"}
+                                value={unitEditForm.depositAmount}
+                                onChange={(event) => setUnitEditForm((current) => ({ ...current, depositAmount: event.target.value }))}
+                              />
+                            </label>
+                          </>
+                        )}
+                        <label className="landlord-field">
+                          <span>Utility arrangement</span>
+                          <input
+                            maxLength={120}
+                            value={unitEditForm.utilityArrangement}
+                            onChange={(event) => setUnitEditForm((current) => ({ ...current, utilityArrangement: event.target.value }))}
+                          />
+                        </label>
+                      </div>
+                      {unitEditError && <p className="property-onboarding-error" role="alert">{unitEditError}</p>}
+                    </div>
+                    <footer className="landlord-form-actions">
+                      <button
+                        className="dashboard-secondary-button"
+                        type="button"
+                        disabled={unitEditSaving}
+                        onClick={() => {
+                          setUnitEditOpen(false);
+                          setUnitEditError(null);
+                        }}
+                      >
+                        Cancel
+                      </button>
+                      <button className="dashboard-primary-button" type="submit" disabled={unitEditSaving || !canEdit}>
+                        {unitEditSaving ? <LoaderCircle className="landlord-spinner" size={15} /> : <Check size={15} />}
+                        {unitEditSaving ? "Saving…" : "Save details"}
+                      </button>
+                    </footer>
+                  </form>
+                ) : (
+                  <div className="unit-overview">
+                    {!details.activeTenancy && !details.upcomingTenancy && (
+                      <section className="unit-vacancy-banner">
+                        <span className="unit-vacancy-icon" aria-hidden="true"><CircleAlert size={20} /></span>
+                        <div>
+                          <h3>This unit is currently unoccupied</h3>
+                          <p>No active tenant or billing lease is assigned. Assign a tenant to start managing rent and lease activity.</p>
+                        </div>
+                        <button type="button" onClick={onAssignTenant} disabled={!canEdit}>
+                          <Users size={15} /> Assign Tenant Now
+                        </button>
+                      </section>
+                    )}
+
+                    <section className="unit-overview-card">
+                      <header>
+                        <h3><i className="is-indigo" /> Unit Specifications</h3>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setUnitEditError(null);
+                            setUnitEditForm({
+                              unitNumber: stringValue(unit.unitNumber, ""),
+                              floor: stringValue(unit.floor, ""),
+                              bedrooms: stringValue(unit.bedrooms, ""),
+                              bathrooms: stringValue(unit.bathrooms, ""),
+                              sizeSqm: stringValue(unit.sizeSqm, ""),
+                              rentAmount: stringValue(unit.rentAmount, ""),
+                              depositAmount: stringValue(unit.depositAmount, "0"),
+                              utilityArrangement: stringValue(unit.utilityArrangement, ""),
+                            });
+                            setUnitEditOpen(true);
+                          }}
+                          disabled={!canEdit}
+                        >
+                          <Pencil size={13} /> Edit Details
+                        </button>
+                      </header>
+                      <div className="unit-spec-grid">
+                        <div className="unit-spec-item">
+                          <span className="unit-spec-icon is-blue"><Home size={18} /></span>
+                          <span><small>Unit Type</small><strong>{isHouse ? "House" : unitPropertyType}</strong></span>
+                        </div>
+                        {!isCommercial && (
+                          <>
+                            <div className="unit-spec-item">
+                              <span className="unit-spec-icon is-indigo"><BedDouble size={18} /></span>
+                              <span><small>Bedrooms</small><strong>{unitBedroomCount || "Not specified"}</strong></span>
+                            </div>
+                            <div className="unit-spec-item">
+                              <span className="unit-spec-icon is-teal"><Bath size={18} /></span>
+                              <span><small>Bathrooms</small><strong>{unitBathroomCount || "Not specified"}</strong></span>
+                            </div>
+                          </>
+                        )}
+                        <div className="unit-spec-item">
+                          <span className="unit-spec-icon is-green"><Ruler size={18} /></span>
+                          <span><small>Floor Area</small><strong>{unitArea ? `${unitArea} m²` : "Not specified"}</strong></span>
+                        </div>
+                        {!isHouse && stringValue(unit.floor, "") && (
+                          <div className="unit-spec-item">
+                            <span className="unit-spec-icon is-slate"><Building2 size={18} /></span>
+                            <span><small>Floor</small><strong>{stringValue(unit.floor)}</strong></span>
+                          </div>
+                        )}
+                      </div>
+                      {hasLease && (
+                        <p className="unit-overview-note">
+                          Lease rent and deposit remain controlled by the active or upcoming tenancy.
+                        </p>
+                      )}
+                    </section>
+
+                    <section className="unit-overview-card">
+                      <header>
+                        <h3><i className="is-green" /> Financial &amp; Billing Overview</h3>
+                        <span>Currency: {currency}</span>
+                      </header>
+                      <div className="unit-financial-grid">
+                        <article>
+                          <small>{hasLease ? "Monthly Rent" : "Target Monthly Rent"}</small>
+                          <strong>{formatAmount(details.rentAmount ?? unit.rentAmount, currency)}</strong>
+                          <p>{hasLease ? "Current lease rate" : `Standard rate for ${stringValue(property.name, "this property")}`}</p>
+                        </article>
+                        <article className={unitOpenBalance > BigInt(0) ? "has-balance" : "is-clear"}>
+                          <small>Open Balance</small>
+                          <strong>
+                            {formatAmount(unitOpenBalance, currency)}
+                            {unitOpenBalance === BigInt(0) && <em>All Clear</em>}
+                          </strong>
+                          <p>{unitOpenBalance > BigInt(0) ? "Outstanding rent across this unit’s tenancies" : "No outstanding arrears"}</p>
+                        </article>
+                        <article>
+                          <small>Security Deposit Held</small>
+                          <strong>{formatAmount(totalUnitDepositHeld ?? details.depositHeld, currency)}</strong>
+                          <p>
+                            {formatAmount(currentUnitDeposit?.requiredAmount ?? details.depositRequired ?? unit.depositAmount, currency)} required on lease
+                          </p>
+                        </article>
+                      </div>
+                    </section>
+
+                    <section className="unit-overview-card unit-lease-history">
+                      <header>
+                        <h3><i className="is-slate" /> Lease &amp; Tenancy History</h3>
+                        <span>{unitTenancyIds.size} Recorded {unitTenancyIds.size === 1 ? "Tenancy" : "Tenancies"}</span>
+                      </header>
+                      {unitLeases.length ? (
+                        <div className="unit-lease-history-list">
+                          {unitLeases.map((lease) => (
+                            <article key={stringValue(lease.id)}>
+                              <span className="unit-lease-history-icon"><FileText size={17} /></span>
+                              <div>
+                                <strong>{stringValue(nested(lease, "tenancy", "tenant", "legalName"), "Tenant")}</strong>
+                                <small>
+                                  {stringValue(lease.status, "Lease").replaceAll("_", " ")} · {dateLabel(lease.startDate)} – {dateLabel(lease.endDate)}
+                                </small>
+                              </div>
+                              <b>{formatAmount(lease.rentAmount, currency)}<small>/month</small></b>
+                            </article>
+                          ))}
+                        </div>
+                      ) : (
+                        <div className="unit-lease-empty">
+                          <span><FileText size={22} /></span>
+                          <strong>No active or archived leases for this unit</strong>
+                          <p>Once you assign a tenant, rent statements, invoices, and payment receipts will appear here automatically.</p>
+                        </div>
+                      )}
+                    </section>
+                  </div>
+                )
+              )}
+              {tab === "ledger" && (
+                <div className="unit-rent-ledger">
+                  <section className="unit-deposit-held-card" aria-label="Security deposit held in escrow">
+                    <span className="unit-deposit-shield" aria-hidden="true"><ShieldCheck size={18} /></span>
+                    <div className="unit-deposit-held-copy">
+                      <strong>Security Deposit Held (Escrow Liability)</strong>
+                      <small>Tracked separately from rent · Required: {formatAmount(currentUnitDeposit?.requiredAmount ?? details.depositRequired, currency)}</small>
+                    </div>
+                    <b>{formatAmount(totalUnitDepositHeld ?? details.depositHeld, currency)}</b>
+                  </section>
+                  <div className="unit-rent-ledger-heading">
+                    <h3>Rent Payment Ledger</h3>
+                    <button type="button" onClick={onRecordRent} disabled={!canEdit}>+ Record Rent</button>
+                  </div>
+                  <div className="unit-ledger-filters" role="search">
+                    <label className="unit-ledger-search">
+                      <Search size={15} aria-hidden="true" />
+                      <input
+                        type="search"
+                        value={ledgerSearch}
+                        onChange={(event) => setLedgerSearch(event.target.value)}
+                        placeholder="Search money history"
+                        aria-label="Search money history"
+                      />
+                    </label>
+                    <label>
+                      <span>Type</span>
+                      <select value={ledgerTypeFilter} onChange={(event) => setLedgerTypeFilter(event.target.value)}>
+                        <option value="all">All activity</option>
+                        <option value="payment">Rent payments</option>
+                        <option value="charge">Rent charges</option>
+                        <option value="deposit">Deposit transactions</option>
+                      </select>
+                    </label>
+                    <label className="unit-ledger-date-filter">
+                      <span>From date</span>
+                      <span className="unit-ledger-date-input">
+                        <input type="date" value={ledgerFromDate} onChange={(event) => setLedgerFromDate(event.target.value)} />
+                        <CalendarDays size={14} aria-hidden="true" />
+                      </span>
+                    </label>
+                    <label className="unit-ledger-date-filter">
+                      <span>To date</span>
+                      <span className="unit-ledger-date-input">
+                        <input type="date" value={ledgerToDate} onChange={(event) => setLedgerToDate(event.target.value)} />
+                        <CalendarDays size={14} aria-hidden="true" />
+                      </span>
+                    </label>
+                  </div>
+                  <div className="unit-ledger-history-list" aria-live="polite">
+                    {filteredLedgerHistory.length ? filteredLedgerHistory.map((entry) => entry.kind === "payment" ? (
+                    (() => {
+                      const payment = entry.record;
+                      const method = stringValue(payment.method);
+                      const methodLabel = method === "MTN_MOMO"
+                        ? "MTN MoMo"
+                        : method === "AIRTEL_MONEY"
+                          ? "Airtel Money"
+                          : method === "BANK_TRANSFER"
+                            ? "Bank Transfer"
+                            : method === "CASH"
+                              ? "Cash"
+                              : method.replaceAll("_", " ");
+                      const recorderName = stringValue(nested(payment, "recorder", "name"), "Property manager");
+                      const recorderNameParts = recorderName.trim().split(/\s+/).filter(Boolean);
+                      const recorderLabel = recorderNameParts.length > 1
+                        ? `${recorderNameParts[0][0]}. ${recorderNameParts.slice(1).join(" ")}`
+                        : recorderName;
+                      const recorderRole = stringValue(nested(payment, "recorder", "memberships", "0", "role"), "")
+                        .toLowerCase()
+                        .replace(/\b\w/g, (letter) => letter.toUpperCase());
+                      const paymentId = stringValue(payment.id, "");
+                      const proofId = stringValue(nested(payment, "proofFile", "id"), "");
+                      return (
+                        <article className={`unit-rent-payment-card${payment.reversedAt ? " is-reversed" : ""}`} key={entry.id}>
+                          <div className="unit-rent-payment-main">
+                            <div>
+                              <strong className="unit-rent-payment-title">{entry.title}</strong>
+                            </div>
+                            <strong className="unit-rent-payment-amount">{formatAmount(payment.amount, currency)}</strong>
+                          </div>
+                          <div className="unit-rent-payment-meta-row">
+                            <small className="unit-rent-payment-meta">
+                              {entry.date} · {methodLabel}
+                              {payment.reference ? ` (${stringValue(payment.reference)})` : " (MANUAL-ENTRY)"}
+                            </small>
+                            <span className="unit-rent-user-recorded">User Recorded</span>
+                          </div>
+                          <div className="unit-rent-payment-bottom">
+                            <div className="unit-rent-payment-attribution">
+                              <small>By {recorderLabel}{recorderRole ? ` (${recorderRole})` : ""}</small>
+                              {proofId && (
+                                <button type="button" className="unit-rent-proof-link" onClick={() => onOpenFile(proofId)}>
+                                  View proof · {stringValue(nested(payment, "proofFile", "fileName"), "attachment")}
+                                </button>
+                              )}
+                            </div>
+                            {payment.reversedAt ? (
+                              <span className="unit-rent-reversed-label">Reversed</span>
+                            ) : reversalPaymentId === paymentId ? (
+                              <div className="property-action-reversal">
+                                <input aria-label="Reversal reason" value={reversalReason} onChange={(event) => setReversalReason(event.target.value)} placeholder="Reason for reversal" />
+                                <button type="button" disabled={saving} onClick={() => void reversePayment(paymentId)}>Confirm</button>
+                                <button type="button" disabled={saving} onClick={() => { setReversalPaymentId(null); setReversalReason(""); }}>Cancel</button>
+                              </div>
+                            ) : (
+                              <button className="unit-rent-reverse-button" type="button" onClick={() => setReversalPaymentId(paymentId)}>
+                                <RotateCcw size={12} /> Reverse Entry
+                              </button>
+                            )}
+                          </div>
+                        </article>
+                      );
+                    })()
+                    ) : (
+                      <article className={`unit-ledger-activity-card is-${entry.kind}`} key={entry.id}>
+                        <div>
+                          <strong>{entry.title}</strong>
+                          <small>{entry.details}</small>
+                        </div>
+                        <strong>
+                          {entry.kind === "deposit" && stringValue(entry.record.type) === "RECEIPT" ? "+ " : ""}
+                          {entry.kind === "deposit" && ["REFUND", "DEDUCTION"].includes(stringValue(entry.record.type)) ? "− " : ""}
+                          {formatAmount(entry.amount, currency)}
+                        </strong>
+                      </article>
+                    )) : (
+                      <p className="unit-ledger-empty">
+                        {ledgerHistory.length ? "No money history matches these filters." : "No financial history has been recorded for this unit yet."}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
+              {tab === "repairs" && (
+                <div>
+                  <h3>Maintenance tickets</h3>
+                  {unitRepairs.length ? unitRepairs.map((request) => (
+                    <div className="property-action-list-row is-stacked" key={stringValue(request.id)}>
+                      <span>
+                        <strong>{stringValue(request.category, "Maintenance request")}</strong>
+                        <small>{stringValue(request.description, "No description provided.")}</small>
+                        <small>
+                          Reported by {stringValue(nested(request, "tenant", "legalName"), "Reporter not linked")}
+                          {" · "}
+                          {stringValue(request.status).replaceAll("_", " ")}
+                          {" · "}
+                          {stringValue(request.priority) === "NORMAL"
+                            ? "Medium"
+                            : stringValue(request.priority).replaceAll("_", " ")}
+                        </small>
+                        <small>
+                          {request.assignedToUserId ? "Technician assigned" : "Unassigned"}
+                          {request.estimatedCost
+                            ? ` · Estimated cost ${formatAmount(request.estimatedCost, currency)}`
+                            : ""}
+                        </small>
+                      </span>
+                      {request.status === "IN_PROGRESS" && <button className="property-row-action-button is-secondary" type="button" disabled={repairSavingId === stringValue(request.id)} onClick={() => void handleCompleteTicket(stringValue(request.id))}>{repairSavingId === stringValue(request.id) ? "Saving…" : "Mark Repair Completed"}</button>}
+                    </div>
+                  )) : <p className="property-action-empty">No maintenance tickets.</p>}
+                  <h3>Immutable inspection records</h3>
+                  {unitInspections.length ? unitInspections.map((inspection) => <div className="property-action-list-row" key={stringValue(inspection.id)}><span><strong>{stringValue(inspection.type).replaceAll("_", " ")}</strong><small>{dateLabel(inspection.inspectedAt)}</small></span><b>{rowsFor(inspection, "items").length} items</b></div>) : <p className="property-action-empty">No inspection history.</p>}
+                </div>
+              )}
+            </div>
+            {error && <p className="property-onboarding-error" role="alert">{error}</p>}
+            {!unitEditOpen && (
+              <footer className="unit-manage-footer">
+                <button type="button" className="unit-manage-footer-close" onClick={onClose}>Close</button>
+                <div className="unit-manage-footer-actions">
+                  <button
+                    type="button"
+                    className={unitOccupancyStatus === "Vacant" ? "unit-manage-past-payment" : "unit-manage-record-rent"}
+                    onClick={onRecordRent}
+                    disabled={!canEdit}
+                  >
+                    {unitOccupancyStatus === "Vacant" ? "Record Past Payment" : "Record Rent"}
+                  </button>
+                  {unitOccupancyStatus === "Vacant" && (
+                    <button
+                      type="button"
+                      className="unit-manage-assign"
+                      onClick={onAssignTenant}
+                      disabled={!canEdit}
+                    >
+                      <Plus size={15} /> Assign Tenant
+                    </button>
+                  )}
+                </div>
+              </footer>
+            )}
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+
+function allocateRent(
+  charges: ValueRecord[],
+  paymentAmount: bigint,
+  currency: string,
+): Array<{ rentChargeId: string; amount: string }> {
+  let remaining = paymentAmount;
+  const allocations: Array<{ rentChargeId: string; amount: string }> = [];
+  for (const charge of charges) {
+    if (remaining <= BigInt(0)) break;
+    const balance = amountMinorUnits(charge.balance);
+    const amount = remaining < balance ? remaining : balance;
+    if (amount <= BigInt(0)) continue;
+    allocations.push({
+      rentChargeId: stringValue(charge.id, ""),
+      amount: minorUnitsInput(amount, currency),
+    });
+    remaining -= amount;
+  }
+  return allocations;
 }
 
 function ConfirmActionDialog({
@@ -1973,6 +5860,795 @@ function TextEntryDialog({
   );
 }
 
+function TenantLeaseOnboardingDialog({
+  organisationId,
+  property,
+  units,
+  tenancies,
+  initialUnitId,
+  fixedUnitId = null,
+  currency,
+  onClose,
+  onComplete,
+}: {
+  organisationId: string;
+  property: ValueRecord;
+  units: ValueRecord[];
+  tenancies: ValueRecord[];
+  initialUnitId: string | null;
+  fixedUnitId?: string | null;
+  currency: string;
+  onClose: () => void;
+  onComplete: (emailSent: boolean) => void;
+}) {
+  const [step, setStep] = useState(0);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const today = new Date().toISOString().slice(0, 10);
+  const yearAhead = `${new Date().getFullYear() + 1}-${today.slice(5)}`;
+  const fixedUnit = fixedUnitId
+    ? units.find((unit) => stringValue(unit.id, "") === fixedUnitId)
+    : undefined;
+  const [values, setValues] = useState({
+    unitId: initialUnitId ?? "",
+    legalName: "",
+    email: "",
+    phone: "",
+    emergencyContactName: "",
+    emergencyContactPhone: "",
+    moveInDate: today,
+    startDate: today,
+    endDate: yearAhead,
+    rentAmount: String(fixedUnit?.rentAmount ?? ""),
+    depositAmount: String(fixedUnit?.depositAmount ?? ""),
+    dueDay: "1",
+    paymentFrequency: "MONTHLY",
+    terms: "",
+  });
+  const propertyId = stringValue(property.id, "");
+  const availableUnits = units.filter((unit) =>
+    unit.status === "AVAILABLE" &&
+    !tenancies.some(
+      (tenancy) =>
+        stringValue(nested(tenancy, "unit", "id"), "") === stringValue(unit.id, "") &&
+        ["ACTIVE", "UPCOMING"].includes(stringValue(tenancy.status, "")),
+    ),
+  );
+  const standalone = units.length === 0;
+  const selectedUnit = fixedUnitId
+    ? fixedUnit
+    : availableUnits.find((unit) => stringValue(unit.id, "") === values.unitId);
+  const update = (name: keyof typeof values, value: string) => {
+    setValues((current) => ({ ...current, [name]: value }));
+  };
+  const tenantStep = fixedUnitId ? 0 : 1;
+  const leaseStep = tenantStep + 1;
+  const reviewStep = leaseStep + 1;
+  const steps = fixedUnitId
+    ? ["Tenant details", "Lease & finances", "Review & send"]
+    : ["Rental space", "Tenant", "Lease & finances", "Review"];
+
+  function continueToNextStep() {
+    if (!fixedUnitId && step === 0 && !standalone && !availableUnits.some((unit) => stringValue(unit.id, "") === values.unitId)) {
+      setError("Select an available rental space.");
+      return;
+    }
+    if (fixedUnitId && (!selectedUnit || ["ARCHIVED", "UNAVAILABLE"].includes(stringValue(selectedUnit.status, "")))) {
+      setError("This unit is no longer available for a tenancy.");
+      return;
+    }
+    if (step === tenantStep && (!values.legalName.trim() || !values.email.trim() || !values.moveInDate)) {
+      setError("Enter the tenant name, email and move-in date.");
+      return;
+    }
+    if (
+      step === leaseStep &&
+      (!values.startDate || !values.endDate || !values.rentAmount || !values.depositAmount || !values.dueDay)
+    ) {
+      setError("Complete the lease dates, rent, deposit and due day.");
+      return;
+    }
+    setError("");
+    setStep((current) => Math.min(reviewStep, current + 1));
+  }
+
+  async function sendLease(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError("");
+    setSaving(true);
+    try {
+      const result = await apiRequest<{ emailSent?: boolean }>(
+        `/organisations/${organisationId}/landlord/tenant-lease-onboardings`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            propertyId,
+            unitId: values.unitId || null,
+            tenant: {
+              legalName: values.legalName.trim(),
+              email: values.email.trim(),
+              phone: values.phone.trim() || undefined,
+              emergencyContactName: values.emergencyContactName.trim() || undefined,
+              emergencyContactPhone: values.emergencyContactPhone.trim() || undefined,
+            },
+            moveInDate: values.moveInDate,
+            lease: {
+              startDate: values.startDate,
+              endDate: values.endDate,
+              rentAmount: values.rentAmount,
+              depositAmount: values.depositAmount,
+              dueDay: Number(values.dueDay),
+              paymentFrequency: values.paymentFrequency,
+              terms: values.terms.trim()
+                ? { additionalTerms: values.terms.trim() }
+                : undefined,
+            },
+          }),
+        },
+      );
+      onComplete(result.emailSent === true);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "The lease could not be sent.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className={`landlord-form-modal-backdrop${fixedUnitId ? " property-setup-backdrop" : ""}`} onMouseDown={(event) => {
+      if (event.target === event.currentTarget && !saving) onClose();
+    }}>
+      <section className={`landlord-form-modal property-onboarding-dialog${fixedUnitId ? " property-setup-drawer property-create-drawer tenant-lease-assignment-drawer" : ""}`} role="dialog" aria-modal="true" aria-labelledby="tenant-lease-onboarding-title">
+        <header className="landlord-form-modal-header">
+          <span className="landlord-form-modal-icon" aria-hidden="true"><Users size={20} /></span>
+          <div>
+            <span className="dashboard-date">{fixedUnitId ? "ASSIGN TENANT" : "TENANT & LEASE SETUP"}</span>
+            <h2 id="tenant-lease-onboarding-title">{fixedUnitId ? "Offer a lease to a tenant" : "Add tenant and create lease"}</h2>
+            <p>{stringValue(property.name, "Property")}{selectedUnit ? ` · Unit ${stringValue(selectedUnit.unitNumber)}` : ""} · Send a lease for review; no payment is recorded.</p>
+          </div>
+          <button type="button" className="landlord-form-modal-close" aria-label="Close tenant and lease setup" onClick={onClose} disabled={saving}><X size={19} /></button>
+        </header>
+        <nav className={`property-onboarding-steps${fixedUnitId ? " is-compact" : ""}`} aria-label="Registration steps">
+          {steps.map((label, index) => (
+            <button type="button" key={label} className={index === step ? "is-current" : index < step ? "is-complete" : ""} onClick={() => index < step && setStep(index)}>
+              <span>{index + 1}</span>{label}
+            </button>
+          ))}
+        </nav>
+        <form className={`property-onboarding-form${fixedUnitId ? " tenant-lease-assignment-form" : ""}`} onSubmit={sendLease}>
+          <div className="property-onboarding-content">
+            {!fixedUnitId && step === 0 && (
+              <>
+                <h3>Choose a rental space</h3>
+                {standalone ? (
+                  <div className="property-onboarding-standalone">
+                    <Building2 size={18} />
+                    <span><strong>Entire property</strong><small>This property has no separate units. The tenancy will be linked directly to the property.</small></span>
+                  </div>
+                ) : (
+                  <label className="landlord-field">
+                    <span>Available unit <i aria-hidden="true">*</i></span>
+                    <select
+                      required
+                      value={values.unitId}
+                      onChange={(event) => {
+                        const unit = availableUnits.find((item) => stringValue(item.id, "") === event.target.value);
+                        setValues((current) => ({
+                          ...current,
+                          unitId: event.target.value,
+                          rentAmount: unit ? String(unit.rentAmount ?? "") : current.rentAmount,
+                          depositAmount: unit ? String(unit.depositAmount ?? "") : current.depositAmount,
+                        }));
+                        setError("");
+                      }}
+                    >
+                      <option value="">Select a vacant unit</option>
+                      {availableUnits.map((unit) => (
+                        <option key={stringValue(unit.id)} value={stringValue(unit.id)}>
+                          Unit {stringValue(unit.unitNumber)} · {stringValue(unit.floor, "Floor not set")} · Vacant
+                        </option>
+                      ))}
+                    </select>
+                    {!availableUnits.length && <small>No vacant units are available. Mark a unit as available before registering a tenant.</small>}
+                  </label>
+                )}
+              </>
+            )}
+            {step === tenantStep && (
+              <>
+                <h3>Tenant information</h3>
+                <div className="property-onboarding-fields">
+                  <label className="landlord-field"><span>Full name <i aria-hidden="true">*</i></span><input required value={values.legalName} onChange={(event) => update("legalName", event.target.value)} /></label>
+                  <label className="landlord-field"><span>Email <i aria-hidden="true">*</i></span><input required type="email" value={values.email} onChange={(event) => update("email", event.target.value)} /></label>
+                  <label className="landlord-field"><span>Phone</span><input value={values.phone} onChange={(event) => update("phone", event.target.value)} /></label>
+                  <label className="landlord-field"><span>Move-in date <i aria-hidden="true">*</i></span><input required type="date" value={values.moveInDate} onChange={(event) => update("moveInDate", event.target.value)} /></label>
+                  <label className="landlord-field"><span>Emergency contact</span><input value={values.emergencyContactName} onChange={(event) => update("emergencyContactName", event.target.value)} /></label>
+                  <label className="landlord-field"><span>Emergency contact phone</span><input value={values.emergencyContactPhone} onChange={(event) => update("emergencyContactPhone", event.target.value)} /></label>
+                </div>
+              </>
+            )}
+            {step === leaseStep && (
+              <>
+                <h3>Lease and financial details</h3>
+                <div className="property-onboarding-tenant-summary">
+                  <span><strong>{values.legalName}</strong><small>{values.email}</small></span>
+                  {values.phone && <small>{values.phone}</small>}
+                </div>
+                <div className="property-onboarding-fields">
+                  <label className="landlord-field"><span>Lease start <i aria-hidden="true">*</i></span><input required type="date" value={values.startDate} onChange={(event) => update("startDate", event.target.value)} /></label>
+                  <label className="landlord-field"><span>Lease end <i aria-hidden="true">*</i></span><input required type="date" value={values.endDate} onChange={(event) => update("endDate", event.target.value)} /></label>
+                  <label className="landlord-field"><span>Monthly rent ({currency}) <i aria-hidden="true">*</i></span><input required min="0" step={currency === "RWF" ? "1" : "0.01"} type="number" value={values.rentAmount} onChange={(event) => update("rentAmount", event.target.value)} /></label>
+                  <label className="landlord-field"><span>Security deposit ({currency}) <i aria-hidden="true">*</i></span><input required min="0" step={currency === "RWF" ? "1" : "0.01"} type="number" value={values.depositAmount} onChange={(event) => update("depositAmount", event.target.value)} /></label>
+                  <label className="landlord-field"><span>Rent due day <i aria-hidden="true">*</i></span><input required min="1" max="31" type="number" value={values.dueDay} onChange={(event) => update("dueDay", event.target.value)} /></label>
+                  <label className="landlord-field"><span>Payment frequency <i aria-hidden="true">*</i></span><select value={values.paymentFrequency} onChange={(event) => update("paymentFrequency", event.target.value)}><option value="MONTHLY">Monthly</option></select></label>
+                  <label className="landlord-field is-wide"><span>Additional terms</span><textarea rows={3} value={values.terms} onChange={(event) => update("terms", event.target.value)} /></label>
+                </div>
+              </>
+            )}
+            {step === reviewStep && (
+              <div className="property-onboarding-review">
+                <h3>Review before sending</h3>
+                {[
+                  ["Rental space", standalone ? "Entire property" : `Unit ${stringValue(selectedUnit?.unitNumber, "—")}`, 0],
+                  ["Tenant", `${values.legalName} · ${values.email}`, tenantStep],
+                  ["Lease", `${dateLabel(values.startDate)} – ${dateLabel(values.endDate)} · ${values.paymentFrequency.toLowerCase()}`, leaseStep],
+                  ["Rent & deposit", `${formatAmount(values.rentAmount, currency)} rent · ${formatAmount(values.depositAmount, currency)} deposit · Due day ${values.dueDay}`, leaseStep],
+                ].map(([label, detail, editStep]) => (
+                  <div key={String(label)}>
+                    <span><strong>{String(label)}</strong><small>{String(detail)}</small></span>
+                    <button type="button" onClick={() => setStep(Number(editStep))}>Edit</button>
+                  </div>
+                ))}
+                <p>The lease document will be generated from these details and emailed to the tenant as a secure review link. Sending does not activate the lease or record rent or deposit payments.</p>
+              </div>
+            )}
+          </div>
+          {error && <p className="property-onboarding-error" role="alert">{error}</p>}
+          <footer className="landlord-form-actions">
+            <button className="dashboard-secondary-button" type="button" onClick={step ? () => setStep((current) => current - 1) : onClose} disabled={saving}>{step ? "Back" : "Cancel"}</button>
+            {step < reviewStep ? (
+              <button className="dashboard-primary-button" type="button" onClick={continueToNextStep}>Continue</button>
+            ) : (
+              <button className="dashboard-primary-button" type="submit" disabled={saving}>
+                {saving ? <LoaderCircle className="landlord-spinner" size={15} /> : <Send size={15} />}
+                {saving ? "Sending lease…" : "Send lease for review"}
+              </button>
+            )}
+          </footer>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+type PropertySetupUnit = {
+  unitNumber: string;
+  floor: string;
+  rentAmount: string;
+  depositAmount: string;
+  bedrooms: string;
+  bathrooms: string;
+  sizeSqm: string;
+};
+
+function PropertySetupDrawer({
+  organisationId,
+  currency,
+  onClose,
+  onComplete,
+}: {
+  organisationId: string;
+  currency: string;
+  onClose: () => void;
+  onComplete: (
+    result: { property: ValueRecord; units: ValueRecord[] },
+    assignTenant: boolean,
+  ) => void;
+}) {
+  const [step, setStep] = useState(0);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [assignTenant, setAssignTenant] = useState(false);
+  const [descriptionOpen, setDescriptionOpen] = useState(false);
+  const [property, setProperty] = useState({
+    name: "",
+    type: "HOUSE",
+    address: "",
+    description: "",
+    status: "ACTIVE",
+  });
+  const isSingleUnitProperty = property.type === "HOUSE";
+  const [unitDefaults, setUnitDefaults] = useState({ rentAmount: "", depositAmount: "" });
+  const [unitRows, setUnitRows] = useState<PropertySetupUnit[]>([
+    {
+      unitNumber: "Main Residence",
+      floor: "",
+      rentAmount: "",
+      depositAmount: "",
+      bedrooms: "",
+      bathrooms: "",
+      sizeSqm: "",
+    },
+  ]);
+  const visibleUnitRows = isSingleUnitProperty
+    ? [{
+        ...(unitRows[0] ?? {
+          unitNumber: "Main Residence",
+          floor: "",
+          rentAmount: "",
+          depositAmount: "",
+          bedrooms: "",
+          bathrooms: "",
+          sizeSqm: "",
+        }),
+        unitNumber: "Main Residence",
+      }]
+    : unitRows.map((unit, index) =>
+        index === 0 && unit.unitNumber === "Main Residence"
+          ? { ...unit, unitNumber: "Unit A1" }
+          : unit,
+      );
+  const steps = ["Property basics", "Rental spaces", "Tenant setup"];
+  const amountStep = currency === "RWF" ? "1" : "0.01";
+
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape" && !saving) onClose();
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [onClose, saving]);
+
+  function updateUnit(index: number, field: keyof PropertySetupUnit, value: string) {
+    setUnitRows((current) => current.map((unit, rowIndex) =>
+      rowIndex === index ? { ...unit, [field]: value } : unit,
+    ));
+  }
+
+  function addUnit() {
+    setUnitRows((current) => {
+      const usedNumbers = new Set(current.map((unit, index) =>
+        index === 0 && unit.unitNumber === "Main Residence" ? "Unit A1" : unit.unitNumber,
+      ));
+      let nextNumber = 1;
+      while (usedNumbers.has(`Unit A${nextNumber}`)) nextNumber += 1;
+      return [...current, {
+        unitNumber: `Unit A${nextNumber}`,
+        floor: "",
+        rentAmount: unitDefaults.rentAmount,
+        depositAmount: unitDefaults.depositAmount,
+        bedrooms: "",
+        bathrooms: "",
+        sizeSqm: "",
+      }];
+    });
+  }
+
+  function continueToNextStep() {
+    if (step === 0 && (property.name.trim().length < 2 || !property.type || property.address.trim().length < 4)) {
+      setError("Enter a property name, type and location.");
+      return;
+    }
+    if (step === 1) {
+      if (visibleUnitRows.some((unit) => !unit.unitNumber.trim() || !unit.rentAmount || !unit.depositAmount)) {
+        setError("Give each rental space a name, monthly rent and security deposit.");
+        return;
+      }
+      if (visibleUnitRows.some((unit) => Number(unit.rentAmount) <= 0 || Number(unit.depositAmount) < 0)) {
+        setError("Rent must be greater than zero and the security deposit cannot be negative.");
+        return;
+      }
+      if (isSingleUnitProperty && visibleUnitRows.some((unit) =>
+        !unit.bedrooms.trim() || !unit.bathrooms.trim() || !unit.sizeSqm.trim(),
+      )) {
+        setError("Enter the number of bedrooms, bathrooms, and the house size.");
+        return;
+      }
+      if (isSingleUnitProperty && visibleUnitRows.some((unit) =>
+        !/^\d+$/.test(unit.bedrooms) ||
+        Number(unit.bedrooms) > 100 ||
+        !/^\d+$/.test(unit.bathrooms) ||
+        Number(unit.bathrooms) > 100 ||
+        !/^\d{1,8}(\.\d{1,2})?$/.test(unit.sizeSqm) ||
+        Number(unit.sizeSqm) <= 0,
+      )) {
+        setError("Bedrooms and bathrooms must be whole numbers from 0 to 100, and size must be a positive number with up to two decimals.");
+        return;
+      }
+      if (
+        currency === "RWF" &&
+        visibleUnitRows.some((unit) => !/^\d+$/.test(unit.rentAmount) || !/^\d+$/.test(unit.depositAmount))
+      ) {
+        setError("RWF rent and security deposits must be entered as whole francs.");
+        return;
+      }
+    }
+    setError("");
+    setStep((current) => Math.min(2, current + 1));
+  }
+
+  async function createProperty(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError("");
+    setSaving(true);
+    try {
+      const result = await apiRequest<{ property: ValueRecord; units: ValueRecord[] }>(
+        `/organisations/${organisationId}/landlord/properties`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            ...property,
+            name: property.name.trim(),
+            address: property.address.trim(),
+            description: property.description.trim() || undefined,
+            status: property.status,
+            units: visibleUnitRows.map((unit) => ({
+              unitNumber: unit.unitNumber.trim(),
+              floor: unit.floor.trim() || undefined,
+              rentAmount: unit.rentAmount,
+              depositAmount: unit.depositAmount,
+              ...(unit.bedrooms ? { bedrooms: Number(unit.bedrooms) } : {}),
+              ...(unit.bathrooms ? { bathrooms: Number(unit.bathrooms) } : {}),
+              ...(unit.sizeSqm ? { sizeSqm: unit.sizeSqm } : {}),
+            })),
+          }),
+        },
+      );
+      onComplete(result, assignTenant);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "The property could not be created.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div
+      className="landlord-form-modal-backdrop property-setup-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !saving) onClose();
+      }}
+    >
+      <section
+        className="landlord-form-modal property-setup-drawer property-create-drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="property-setup-title"
+      >
+        <header className="landlord-form-modal-header">
+          <div>
+            <h2 id="property-setup-title">Add a property</h2>
+            <p>Create the property and its rental spaces together.</p>
+            <span className="property-setup-step-hint" aria-live="polite">
+              Step {step + 1} of 3 · {steps[step]}
+            </span>
+          </div>
+          <button type="button" className="landlord-form-modal-close" aria-label="Close property setup" onClick={onClose} disabled={saving}><X size={19} /></button>
+        </header>
+        <nav className="property-onboarding-steps" aria-label="Property setup steps">
+          {steps.map((label, index) => (
+            <button
+              type="button"
+              key={label}
+              aria-current={index === step ? "step" : undefined}
+              className={index === step ? "is-current" : index < step ? "is-complete" : ""}
+              disabled={index > step}
+              onClick={() => index < step && setStep(index)}
+            >
+              <span>{index + 1}</span>{label}
+            </button>
+          ))}
+        </nav>
+        <form className="property-setup-form" onSubmit={createProperty}>
+          <div className="property-setup-content">
+            {step === 0 && (
+              <>
+                <h3>Property basics</h3>
+                <div className="property-onboarding-fields property-setup-property-fields">
+                  <label className="landlord-field is-wide">
+                    <span>Property name <i aria-hidden="true">*</i></span>
+                    <input
+                      required
+                      minLength={2}
+                      maxLength={180}
+                      placeholder="e.g., Kigali Heights Annex"
+                      value={property.name}
+                      onChange={(event) => setProperty((current) => ({ ...current, name: event.target.value }))}
+                    />
+                  </label>
+                  <label className="landlord-field">
+                    <span>Sector / location <i aria-hidden="true">*</i></span>
+                    <input
+                      required
+                      minLength={4}
+                      maxLength={500}
+                      placeholder="e.g., Kimihurura, Gasabo"
+                      value={property.address}
+                      onChange={(event) => setProperty((current) => ({ ...current, address: event.target.value }))}
+                    />
+                  </label>
+                  <label className="landlord-field">
+                    <span>Property type <i aria-hidden="true">*</i></span>
+                    <select
+                      value={property.type}
+                      onChange={(event) => setProperty((current) => ({ ...current, type: event.target.value }))}
+                    >
+                      <option value="APARTMENT_BUILDING">Apartment building</option>
+                      <option value="HOUSE">House</option>
+                      <option value="COMMERCIAL">Commercial</option>
+                      <option value="MIXED_USE">Mixed use</option>
+                      <option value="OTHER">Other</option>
+                    </select>
+                  </label>
+                  <label className="landlord-field property-setup-status-field">
+                    <span>Status</span>
+                    <select
+                      value={property.status}
+                      onChange={(event) => setProperty((current) => ({ ...current, status: event.target.value }))}
+                    >
+                      <option value="ACTIVE">Active</option>
+                      <option value="INACTIVE">Inactive</option>
+                      <option value="ARCHIVED">Archived</option>
+                    </select>
+                  </label>
+                </div>
+                <div className="property-setup-description">
+                  <button
+                    className="property-setup-description-toggle"
+                    type="button"
+                    aria-expanded={descriptionOpen}
+                    aria-controls={descriptionOpen ? "property-description-field" : undefined}
+                    onClick={() => setDescriptionOpen((open) => !open)}
+                  >
+                    {descriptionOpen ? "− Hide Description" : "+ Add Description"}
+                  </button>
+                  {descriptionOpen && (
+                    <label className="landlord-field is-wide" id="property-description-field">
+                      <span>Description <small>(Optional)</small></span>
+                      <textarea
+                        rows={3}
+                        maxLength={5000}
+                        value={property.description}
+                        onChange={(event) => setProperty((current) => ({ ...current, description: event.target.value }))}
+                      />
+                    </label>
+                  )}
+                </div>
+              </>
+            )}
+            {step === 1 && (
+              <>
+                <h3>{isSingleUnitProperty ? "Main Residence" : "Build your rental spaces"}</h3>
+                <p className="property-setup-intro">
+                  {isSingleUnitProperty
+                    ? "This house will have one Main Residence rental space."
+                    : "Add and price the units in this property."}
+                </p>
+                {!isSingleUnitProperty && unitRows.length > 1 && (
+                  <div className="property-setup-quick-fill">
+                    <label className="landlord-field"><span>Default rent ({currency})</span><input min="0" step={amountStep} type="number" value={unitDefaults.rentAmount} onChange={(event) => setUnitDefaults((current) => ({ ...current, rentAmount: event.target.value }))} /></label>
+                    <label className="landlord-field"><span>Default deposit ({currency})</span><input min="0" step={amountStep} type="number" value={unitDefaults.depositAmount} onChange={(event) => setUnitDefaults((current) => ({ ...current, depositAmount: event.target.value }))} /></label>
+                    <button type="button" className="dashboard-secondary-button" onClick={() => setUnitRows((current) => current.map((unit) => ({ ...unit, rentAmount: unitDefaults.rentAmount || unit.rentAmount, depositAmount: unitDefaults.depositAmount || unit.depositAmount })))}>Apply defaults to all</button>
+                  </div>
+                )}
+                <div className="property-setup-unit-list">
+                  {visibleUnitRows.map((unit, index) => (
+                    <fieldset className={`property-setup-unit${isSingleUnitProperty ? " is-single-unit" : " is-multi-unit"}`} key={`setup-unit-${index}`}>
+                      <legend>{isSingleUnitProperty ? "Main Residence" : `Rental space ${index + 1}`}</legend>
+                      <div className="property-onboarding-fields">
+                        {!isSingleUnitProperty && (
+                          <>
+                            <label className="landlord-field"><span>Unit name <i aria-hidden="true">*</i></span><input required maxLength={80} value={unit.unitNumber} onChange={(event) => updateUnit(index, "unitNumber", event.target.value)} /></label>
+                            <label className="landlord-field"><span>Floor</span><input maxLength={40} value={unit.floor} onChange={(event) => updateUnit(index, "floor", event.target.value)} /></label>
+                          </>
+                        )}
+                        <label className="landlord-field"><span>Monthly rent ({currency}) <i aria-hidden="true">*</i></span><input required min="1" step={amountStep} type="number" value={unit.rentAmount} onChange={(event) => updateUnit(index, "rentAmount", event.target.value)} /></label>
+                        <label className="landlord-field"><span>Security deposit ({currency}) <i aria-hidden="true">*</i></span><input required min="0" step={amountStep} type="number" value={unit.depositAmount} onChange={(event) => updateUnit(index, "depositAmount", event.target.value)} /></label>
+                        {isSingleUnitProperty && (
+                          <>
+                            <label className="landlord-field">
+                              <span>Bedrooms <i aria-hidden="true">*</i></span>
+                              <input required min="0" max="100" step="1" type="number" value={unit.bedrooms} onChange={(event) => updateUnit(index, "bedrooms", event.target.value)} />
+                            </label>
+                            <label className="landlord-field">
+                              <span>Bathrooms <i aria-hidden="true">*</i></span>
+                              <input required min="0" max="100" step="1" type="number" value={unit.bathrooms} onChange={(event) => updateUnit(index, "bathrooms", event.target.value)} />
+                            </label>
+                            <label className="landlord-field">
+                              <span>Size (m²) <i aria-hidden="true">*</i></span>
+                              <input required min="0.01" max="99999999.99" step="0.01" type="number" value={unit.sizeSqm} onChange={(event) => updateUnit(index, "sizeSqm", event.target.value)} />
+                            </label>
+                          </>
+                        )}
+                      </div>
+                      {!isSingleUnitProperty && unitRows.length > 1 && <button className="property-setup-remove-unit" type="button" onClick={() => setUnitRows((current) => current.filter((_, rowIndex) => rowIndex !== index))}>Remove unit</button>}
+                    </fieldset>
+                  ))}
+                </div>
+                {!isSingleUnitProperty && (
+                  <button type="button" className="property-setup-add-unit" onClick={addUnit} disabled={unitRows.length >= 100}>
+                    <Plus size={15} /> {unitRows.length >= 100 ? "Maximum units reached" : "Add another unit"}
+                  </button>
+                )}
+              </>
+            )}
+            {step === 2 && (
+              <>
+                <h3>Tenant setup</h3>
+                <p className="property-setup-intro">You can create vacant rental spaces now, or continue directly into tenant and lease setup for the first space.</p>
+                <label className={`property-setup-assign-option${assignTenant ? " is-selected" : ""}`}>
+                  <input type="checkbox" checked={assignTenant} onChange={(event) => setAssignTenant(event.target.checked)} />
+                  <span><strong>Set up a tenant now</strong><small>After creating the property, continue to the guided tenant, lease and finance workflow. The lease is sent for tenant review; this step does not claim that a payment has been received.</small></span>
+                </label>
+                <div className="property-onboarding-review">
+                  <div><span><strong>Property</strong><small>{property.name} · {property.address}</small></span><button type="button" onClick={() => setStep(0)}>Edit</button></div>
+                  <div><span><strong>Rental spaces</strong><small>{visibleUnitRows.length} {visibleUnitRows.length === 1 ? "space" : "spaces"} · {visibleUnitRows.map((unit) => unit.unitNumber).join(", ")}</small></span><button type="button" onClick={() => setStep(1)}>Edit</button></div>
+                </div>
+              </>
+            )}
+          </div>
+          {error && <p className="property-onboarding-error" role="alert">{error}</p>}
+          <footer className="landlord-form-actions">
+            <button className="dashboard-secondary-button" type="button" onClick={step ? () => setStep((current) => current - 1) : onClose} disabled={saving}>{step ? "Back" : "Cancel"}</button>
+            {step < 2 ? (
+              <button className="dashboard-primary-button" type="button" onClick={continueToNextStep}>Continue -&gt;</button>
+            ) : (
+              <button className="dashboard-primary-button" type="submit" disabled={saving}>
+                {saving ? <LoaderCircle className="landlord-spinner" size={15} /> : <Check size={15} />}
+                {saving ? "Creating…" : assignTenant ? "Create and set up tenant" : "Create property"}
+              </button>
+            )}
+          </footer>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+function TenantLeaseResendDialog({
+  organisationId,
+  lease,
+  tenant,
+  tenancy,
+  deposit,
+  currency,
+  onClose,
+  onComplete,
+}: {
+  organisationId: string;
+  lease: ValueRecord;
+  tenant: ValueRecord;
+  tenancy: ValueRecord;
+  deposit: ValueRecord;
+  currency: string;
+  onClose: () => void;
+  onComplete: (emailSent: boolean) => void;
+}) {
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [values, setValues] = useState({
+    legalName: stringValue(tenant.legalName, ""),
+    email: stringValue(tenant.email, ""),
+    phone: stringValue(tenant.phone, ""),
+    emergencyContactName: stringValue(tenant.emergencyContactName, ""),
+    emergencyContactPhone: stringValue(tenant.emergencyContactPhone, ""),
+    moveInDate: stringValue(tenancy.moveInDate, "").slice(0, 10),
+    startDate: stringValue(lease.startDate, "").slice(0, 10),
+    endDate: stringValue(lease.endDate, "").slice(0, 10),
+    rentAmount: stringValue(lease.rentAmount, ""),
+    depositAmount: stringValue(deposit.requiredAmount, ""),
+    dueDay: stringValue(lease.dueDay, "1"),
+    terms: JSON.stringify(record(lease.terms), null, 2),
+  });
+  const update = (name: keyof typeof values, value: string) => {
+    setValues((current) => ({ ...current, [name]: value }));
+  };
+
+  async function resend(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const leaseId = stringValue(lease.id, "");
+    if (!leaseId) {
+      setError("The lease record could not be identified.");
+      return;
+    }
+    let terms: unknown;
+    try {
+      terms = values.terms.trim() ? JSON.parse(values.terms) as unknown : {};
+    } catch {
+      setError("Enter valid JSON for the additional agreement terms.");
+      return;
+    }
+    if (!terms || typeof terms !== "object" || Array.isArray(terms)) {
+      setError("Additional agreement terms must be a JSON object.");
+      return;
+    }
+    setSaving(true);
+    setError("");
+    try {
+      const result = await apiRequest<{ emailSent?: boolean }>(
+        `/organisations/${organisationId}/landlord/leases/${leaseId}/tenant-lease-onboardings/resend`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            tenant: {
+              legalName: values.legalName.trim(),
+              email: values.email.trim(),
+              phone: values.phone.trim(),
+              emergencyContactName: values.emergencyContactName.trim(),
+              emergencyContactPhone: values.emergencyContactPhone.trim(),
+            },
+            moveInDate: values.moveInDate,
+            lease: {
+              startDate: values.startDate,
+              endDate: values.endDate,
+              rentAmount: values.rentAmount,
+              depositAmount: values.depositAmount,
+              dueDay: Number(values.dueDay),
+              paymentFrequency: "MONTHLY",
+              terms,
+            },
+          }),
+        },
+      );
+      onComplete(result.emailSent === true);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "The updated lease could not be sent.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="landlord-form-modal-backdrop" onMouseDown={(event) => {
+      if (event.target === event.currentTarget && !saving) onClose();
+    }}>
+      <section className="landlord-form-modal property-onboarding-dialog" role="dialog" aria-modal="true" aria-labelledby="tenant-lease-resend-title">
+        <header className="landlord-form-modal-header">
+          <span className="landlord-form-modal-icon" aria-hidden="true"><FileText size={20} /></span>
+          <div>
+            <span className="dashboard-date">LEASE REVIEW FOLLOW-UP</span>
+            <h2 id="tenant-lease-resend-title">Edit and resend lease</h2>
+            <p>Update the agreement and send a new secure review link.</p>
+          </div>
+          <button type="button" className="landlord-form-modal-close" aria-label="Close lease editor" onClick={onClose} disabled={saving}><X size={19} /></button>
+        </header>
+        <form className="property-onboarding-form" onSubmit={resend}>
+          <div className="property-onboarding-content">
+            <div className="property-onboarding-fields">
+              <label className="landlord-field"><span>Tenant name <i aria-hidden="true">*</i></span><input required value={values.legalName} onChange={(event) => update("legalName", event.target.value)} /></label>
+              <label className="landlord-field"><span>Email <i aria-hidden="true">*</i></span><input required type="email" value={values.email} onChange={(event) => update("email", event.target.value)} /></label>
+              <label className="landlord-field"><span>Phone</span><input value={values.phone} onChange={(event) => update("phone", event.target.value)} /></label>
+              <label className="landlord-field"><span>Emergency contact</span><input value={values.emergencyContactName} onChange={(event) => update("emergencyContactName", event.target.value)} /></label>
+              <label className="landlord-field"><span>Emergency contact phone</span><input value={values.emergencyContactPhone} onChange={(event) => update("emergencyContactPhone", event.target.value)} /></label>
+              <label className="landlord-field"><span>Move-in date <i aria-hidden="true">*</i></span><input required type="date" value={values.moveInDate} onChange={(event) => update("moveInDate", event.target.value)} /></label>
+              <label className="landlord-field"><span>Lease start <i aria-hidden="true">*</i></span><input required type="date" value={values.startDate} onChange={(event) => update("startDate", event.target.value)} /></label>
+              <label className="landlord-field"><span>Lease end <i aria-hidden="true">*</i></span><input required type="date" value={values.endDate} onChange={(event) => update("endDate", event.target.value)} /></label>
+              <label className="landlord-field"><span>Monthly rent ({currency}) <i aria-hidden="true">*</i></span><input required min="0" step="0.01" type="number" value={values.rentAmount} onChange={(event) => update("rentAmount", event.target.value)} /></label>
+              <label className="landlord-field"><span>Security deposit ({currency}) <i aria-hidden="true">*</i></span><input required min="0" step="0.01" type="number" value={values.depositAmount} onChange={(event) => update("depositAmount", event.target.value)} /></label>
+              <label className="landlord-field"><span>Rent due day <i aria-hidden="true">*</i></span><input required min="1" max="28" type="number" value={values.dueDay} onChange={(event) => update("dueDay", event.target.value)} /></label>
+              <label className="landlord-field"><span>Payment frequency</span><input value="Monthly" readOnly /></label>
+              <label className="landlord-field is-wide"><span>Additional agreement terms (JSON object)</span><textarea rows={4} value={values.terms} onChange={(event) => update("terms", event.target.value)} /></label>
+            </div>
+            {error && <p className="property-onboarding-error" role="alert">{error}</p>}
+          </div>
+          <footer className="landlord-form-actions">
+            <button className="dashboard-secondary-button" type="button" onClick={onClose} disabled={saving}>Cancel</button>
+            <button className="dashboard-primary-button" type="submit" disabled={saving}>
+              {saving ? <LoaderCircle className="landlord-spinner" size={15} /> : <Send size={15} />}
+              {saving ? "Resending lease…" : "Resend for tenant review"}
+            </button>
+          </footer>
+        </form>
+      </section>
+    </div>
+  );
+}
+
 function PropertyOwnerList({
   rows,
   onEdit,
@@ -2170,7 +6846,7 @@ function Form({
                 onChange={(event) => onChange(field.name, event.currentTarget.value)}
                 placeholder={field.placeholder}
                 required={field.required}
-                step={field.type === "number" ? "0.01" : undefined}
+                step={field.type === "number" ? field.step ?? "0.01" : undefined}
                 type={field.type ?? "text"}
                 value={values[field.name] ?? ""}
               />
@@ -2209,8 +6885,51 @@ function SelectedPhoto({ file }: { file: File }) {
     : <span className="landlord-photo-placeholder">Preparing photo preview…</span>;
 }
 
-function WorkspaceContentSkeleton({ section }: { section: SectionName }) {
+function WorkspaceContentSkeleton({
+  section,
+  unitDetailsOnly = false,
+}: {
+  section: SectionName;
+  unitDetailsOnly?: boolean;
+}) {
   const title = section === "Rent & Deposits" ? "Rent and deposit records" : section;
+  if (unitDetailsOnly && section === "Units") {
+    return (
+      <section
+        className="landlord-panel landlord-content-skeleton property-unit-details-skeleton"
+        role="status"
+        aria-label="Loading unit details"
+        aria-busy="true"
+      >
+        <span className="visually-hidden">Loading unit details…</span>
+        <div className="landlord-panel-heading">
+          <div><h2>Unit details</h2></div>
+        </div>
+        <div className="property-units-table-wrap">
+          <table className="property-units-table">
+            <thead>
+              <tr>
+                <th scope="col">Unit name</th>
+                <th scope="col">Area</th>
+                <th scope="col">Floor</th>
+                <th scope="col">Bedrooms</th>
+                <th scope="col">Bathrooms</th>
+                <th scope="col">Price</th>
+                <th scope="col"><span className="visually-hidden">Actions</span></th>
+              </tr>
+            </thead>
+            <tbody aria-hidden="true">
+              <tr>
+                {Array.from({ length: 7 }, (_, index) => (
+                  <td key={index}><span className="landlord-skeleton-block" /></td>
+                ))}
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    );
+  }
   return (
     <section
       className="landlord-panel landlord-content-skeleton"
@@ -2293,7 +7012,7 @@ function OrganisationFileImage({
       : typeof fileId === "string" && fileId
         ? "Loading property photo"
         : "No property photo";
-    return <span className="landlord-photo-placeholder" role="img" aria-label={message}><Building2 size={22} /></span>;
+    return <span className={`landlord-photo-placeholder ${className}-placeholder`} role="img" aria-label={message}><Building2 size={22} /></span>;
   }
   return <img className={className} src={imageUrl} alt={alt} onError={() => setFailed(true)} />;
 }
@@ -2313,6 +7032,7 @@ function RecordList({
   canEditTeamMember,
   canRemoveTeamMember,
   onLeaseStatus,
+  onResendLease,
   tenantMode,
   onMoveOut,
   onAssignUnit,
@@ -2332,6 +7052,7 @@ function RecordList({
   canEditTeamMember?: (row: ValueRecord) => boolean;
   canRemoveTeamMember?: (row: ValueRecord) => boolean;
   onLeaseStatus?: (row: ValueRecord, status: string) => void;
+  onResendLease?: (row: ValueRecord) => void;
   tenantMode?: "tenants" | "tenancies";
   onMoveOut?: (row: ValueRecord) => void;
   onAssignUnit?: (row: ValueRecord) => void;
@@ -2785,6 +7506,7 @@ function RecordList({
             </tr>
           ) : visibleRows.map((row, index) => {
         const id = typeof row.id === "string" ? row.id : `${section}-${index}`;
+          const paymentProofId = stringValue(nested(row, "proofFile", "id"), "");
           const actionId =
             section === "Team" && typeof row.userId === "string"
               ? row.userId
@@ -3051,8 +7773,19 @@ function RecordList({
                   {status === "ACTIVE" && <option value="TERMINATED">Terminate</option>}
                 </select>
               )}
+              {section === "Leases" && onResendLease &&
+                ["PENDING_TENANT_REVIEW", "CHANGES_REQUESTED"].includes(status) && (
+                  <button className="landlord-text-action" type="button" onClick={() => onResendLease(row)}>
+                    Edit &amp; resend
+                  </button>
+                )}
               {(section === "Leases" || section === "Inspections") && onDownload && (
                 <FileDownloadButtons row={row} section={section} onDownload={onDownload} />
+              )}
+              {section === "Rent & Deposits" && rentMode === "payments" && paymentProofId && onDownload && (
+                <button className="landlord-icon-button" type="button" aria-label="Download payment proof" onClick={() => onDownload(paymentProofId)}>
+                  <ArrowDownToLine size={15} />
+                </button>
               )}
               {(section === "Expenses" || section === "Utilities") &&
                 typeof row.evidenceFileId === "string" &&

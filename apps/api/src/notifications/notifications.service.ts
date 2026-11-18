@@ -44,6 +44,12 @@ export class NotificationsService {
       });
       if (existing) {
         if (existing.status !== 'SENT') {
+          if (existing.status === 'CANCELLED') {
+            await this.prisma.notification.update({
+              where: { id: existing.id },
+              data: { status: 'QUEUED' },
+            });
+          }
           await this.ensureQueued(existing.id);
         }
         return { notificationId: existing.id };
@@ -68,6 +74,12 @@ export class NotificationsService {
         });
         if (existing) {
           if (existing.status !== 'SENT') {
+            if (existing.status === 'CANCELLED') {
+              await this.prisma.notification.update({
+                where: { id: existing.id },
+                data: { status: 'QUEUED' },
+              });
+            }
             await this.ensureQueued(existing.id);
           }
           return { notificationId: existing.id };
@@ -83,7 +95,8 @@ export class NotificationsService {
   private async ensureQueued(notificationId: string): Promise<void> {
     const job = await this.queue.getJob(notificationId);
     if (job) {
-      if ((await job.getState()) === 'failed') {
+      const state = await job.getState();
+      if (state === 'failed') {
         await this.prisma.notification.update({
           where: { id: notificationId },
           data: { status: 'QUEUED' },
@@ -97,8 +110,10 @@ export class NotificationsService {
           });
           throw error;
         }
+        return;
       }
-      return;
+      if (state !== 'completed') return;
+      await job.remove();
     }
 
     await this.prisma.notification.update({

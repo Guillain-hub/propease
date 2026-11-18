@@ -6,16 +6,18 @@ background work.
 
 ## Local development
 
-From the repository root, start the local PostgreSQL and Redis services:
+For local development on Windows, start the Memurai service and PostgreSQL.
+Memurai should listen on `127.0.0.1:6379`. From the repository root:
 
 ```powershell
-docker compose up -d postgres redis
+docker compose up -d postgres
 Copy-Item apps/api/.env.example apps/api/.env
 ```
 
 Replace both JWT secret placeholders in `apps/api/.env` with unique random
-values. Then install the API dependencies, generate the Prisma client, create
-the development database migration, and start the API:
+values and keep `REDIS_URL=redis://127.0.0.1:6379` for local development.
+Then install the API dependencies, generate the Prisma client, create the
+development database migration, and start the API:
 
 ```powershell
 npm --prefix apps/api install
@@ -29,6 +31,11 @@ database-backed health endpoint is `GET /api/v1/health`. Root-level scripts
 `npm run api:build`, `npm run api:dev`, `npm run db:generate`, and
 `npm run dev:all` are also available. `npm run dev:all` starts the Next.js
 frontend and API together; PostgreSQL and Redis must still be reachable.
+The API process also starts the BullMQ notification and rent-charge workers;
+there is no separate worker command. The API checks Redis before listening and
+exits with a diagnostic if it cannot connect. Production should continue to
+provide its Upstash URL through its production `REDIS_URL` secret; the local
+Memurai URL is only a development setting.
 
 The Next.js login and registration forms call
 `http://localhost:4000/api/v1/auth` by default and send authentication cookies
@@ -95,7 +102,8 @@ The landlord route prefix is
 - `GET|POST /tenants`, `GET|POST /tenancies`,
   `PATCH /tenants/:tenantId`, `PATCH /tenancies/:tenancyId/move-out`
 - `GET|POST /leases`, `PATCH /leases/:leaseId/status`,
-  `POST /leases/:leaseId/documents`
+  `POST /leases/:leaseId/documents`, and
+  `POST /tenant-lease-onboardings`
 - `GET|POST /inspections`, `POST /inspections/:inspectionId/media`
 - `GET|POST /rent/charges`, `POST /rent/charges/:chargeId/void`,
   `GET|POST /rent/payments`, `POST /rent/payments/:paymentId/reverse`,
@@ -105,6 +113,29 @@ The landlord route prefix is
 - `GET|POST /team`, `PATCH /team/:memberId`,
   `GET|POST /subscription`, subscription invoice payment submission,
   and `GET|PATCH /settings`
+
+Tenant lease offers are created with
+`POST /api/v1/organisations/:organisationId/landlord/tenant-lease-onboardings`.
+The request contains `propertyId`, optional `unitId`, `tenant` details,
+`moveInDate`, and a `lease` object (`startDate`, `endDate`, `rentAmount`,
+`dueDay`, `depositAmount`, `paymentFrequency`, and optional `terms`). A missing
+or null `unitId` creates a property-level rental tenancy without a synthetic
+unit. The response includes tenant, tenancy, lease, and onboarding IDs, the
+`PENDING_TENANT_REVIEW` status, expiration time, and whether email delivery
+succeeded. `paymentFrequency` currently accepts `MONTHLY`, matching the API's
+existing monthly rent-charge scheduler.
+
+The tenant email links to the web app, which can use the public API routes
+`GET /api/v1/tenant-lease-reviews/:token`,
+`POST /api/v1/tenant-lease-reviews/:token/response` (body:
+`{ "response": "ACCEPTED" | "CHANGES_REQUESTED" | "DECLINED", "message": "..." }`),
+and `GET /api/v1/tenant-lease-reviews/:token/document`. Tokens are random,
+expiring, single-response credentials; only their SHA-256 hashes are stored.
+Agreement snapshots are immutable and versioned. A tenant response updates
+the lease review status and creates an in-app manager notification; acceptance
+does not record rent or deposit as paid. Managers can resend or update a pending
+or change-requested offer with
+`POST /api/v1/organisations/:organisationId/landlord/leases/:leaseId/tenant-lease-onboardings/resend`.
 
 Organisation file uploads are handled by
 `/api/v1/organisations/:organisationId/files`. Apply the committed Prisma

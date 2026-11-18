@@ -4,9 +4,16 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { AppModule } from './app.module.js';
+import { RedisConnectionCheck } from './config/redis-connection-check.service.js';
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create(AppModule);
+  try {
+    await app.get(RedisConnectionCheck).check();
+  } catch (error) {
+    await app.close();
+    throw error;
+  }
   const config = app.get(ConfigService);
   const origins = config
     .getOrThrow<string>('APP_ORIGINS')

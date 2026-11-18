@@ -1,10 +1,11 @@
 import { Processor, WorkerHost, OnWorkerEvent } from '@nestjs/bullmq';
 import { Injectable, Logger } from '@nestjs/common';
-import { Prisma } from '@prisma/client';
+import { LeaseStatus, Prisma, TenancyStatus, UnitStatus } from '@prisma/client';
 import type { Job } from 'bullmq';
 import { NotificationsService } from '../notifications/notifications.service.js';
 import { PrismaService } from '../database/prisma.service.js';
 import { rentChargesQueue } from './rent-charges.constants.js';
+import { applyUnallocatedPaymentCredits } from './rent-credits.js';
 
 export function getRentChargePeriod(date: Date): string {
   return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
@@ -35,6 +36,9 @@ export class RentChargesProcessor extends WorkerHost {
       return;
     }
     if (job.name === 'daily-rent-follow-up') {
+      const now = new Date();
+      await this.activateAcceptedLeases(now);
+      await this.activateUpcomingTenancies(now);
       await this.updateOverdueCharges();
       await this.enqueueUpcomingRentReminders(new Date());
       return;
@@ -76,9 +80,7 @@ export class RentChargesProcessor extends WorkerHost {
         rentAmount: true,
         tenancy: {
           select: {
-            unit: {
-              select: { property: { select: { organisationId: true } } },
-            },
+            property: { select: { organisationId: true } },
           },
         },
       },
@@ -99,13 +101,18 @@ export class RentChargesProcessor extends WorkerHost {
           });
           await transaction.auditLog.create({
             data: {
-              organisationId: lease.tenancy.unit.property.organisationId,
+              organisationId: lease.tenancy.property.organisationId,
               action: 'rent_charge.generated',
               entityType: 'rent_charge',
               entityId: charge.id,
             },
           });
-        });
+          await applyUnallocatedPaymentCredits(
+            transaction,
+            charge.id,
+            lease.tenancy.property.organisationId,
+          );
+        }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
       } catch (error) {
         if (
           error instanceof Prisma.PrismaClientKnownRequestError &&
@@ -129,6 +136,138 @@ export class RentChargesProcessor extends WorkerHost {
       },
       data: { status: 'OVERDUE' },
     });
+  }
+
+  private async activateAcceptedLeases(now: Date): Promise<void> {
+    const today = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
+    );
+    const leases = await this.prisma.lease.findMany({
+      where: {
+        status: LeaseStatus.TENANT_ACCEPTED,
+        startDate: { lte: today },
+        endDate: { gte: today },
+        tenancy: {
+          is: {
+            status: { in: [TenancyStatus.UPCOMING, TenancyStatus.ACTIVE] },
+            OR: [{ moveOutDate: null }, { moveOutDate: { gte: today } }],
+          },
+        },
+      },
+      select: {
+        id: true,
+        tenancy: {
+          select: {
+            id: true,
+            unitId: true,
+            moveInDate: true,
+            property: { select: { organisationId: true } },
+          },
+        },
+      },
+    });
+
+    for (const lease of leases) {
+      await this.prisma.$transaction(async (transaction) => {
+        const activated = await transaction.lease.updateMany({
+          where: {
+            id: lease.id,
+            status: LeaseStatus.TENANT_ACCEPTED,
+            startDate: { lte: today },
+            endDate: { gte: today },
+          },
+          data: { status: LeaseStatus.ACTIVE },
+        });
+        if (activated.count !== 1) return;
+
+        if (lease.tenancy.moveInDate <= today) {
+          const tenancy = await transaction.tenancy.updateMany({
+            where: {
+              id: lease.tenancy.id,
+              status: TenancyStatus.UPCOMING,
+              moveInDate: { lte: today },
+            },
+            data: { status: TenancyStatus.ACTIVE },
+          });
+          if (tenancy.count === 1 && lease.tenancy.unitId) {
+            await transaction.unit.updateMany({
+              where: {
+                id: lease.tenancy.unitId,
+                status: { not: UnitStatus.ARCHIVED },
+              },
+              data: { status: UnitStatus.OCCUPIED },
+            });
+          }
+        }
+
+        await transaction.auditLog.create({
+          data: {
+            organisationId: lease.tenancy.property.organisationId,
+            action: 'lease.activated',
+            entityType: 'lease',
+            entityId: lease.id,
+          },
+        });
+      });
+    }
+  }
+
+  private async activateUpcomingTenancies(now: Date): Promise<void> {
+    const today = new Date(
+      Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
+    );
+    const tenancies = await this.prisma.tenancy.findMany({
+      where: {
+        status: TenancyStatus.UPCOMING,
+        moveInDate: { lte: today },
+        OR: [{ moveOutDate: null }, { moveOutDate: { gte: today } }],
+        leases: {
+          some: {
+            status: LeaseStatus.ACTIVE,
+            startDate: { lte: today },
+            endDate: { gte: today },
+          },
+        },
+      },
+      select: {
+        id: true,
+        unitId: true,
+        property: { select: { organisationId: true } },
+      },
+    });
+
+    for (const tenancy of tenancies) {
+      await this.prisma.$transaction(async (transaction) => {
+        const activated = await transaction.tenancy.updateMany({
+          where: {
+            id: tenancy.id,
+            status: TenancyStatus.UPCOMING,
+            moveInDate: { lte: today },
+          },
+          data: { status: TenancyStatus.ACTIVE },
+        });
+        if (activated.count !== 1) return;
+
+        if (tenancy.unitId) {
+          await transaction.unit.updateMany({
+            where: {
+              id: tenancy.unitId,
+              status: { not: UnitStatus.ARCHIVED },
+            },
+            data: { status: UnitStatus.OCCUPIED },
+          });
+        }
+
+        await transaction.auditLog.create({
+          data: {
+            organisationId: tenancy.property.organisationId,
+            action: 'tenancy.activated',
+            entityType: 'tenancy',
+            entityId: tenancy.id,
+          },
+        });
+      });
+    }
   }
 
   private async enqueueUpcomingRentReminders(now: Date): Promise<void> {
@@ -156,14 +295,13 @@ export class RentChargesProcessor extends WorkerHost {
             tenant: {
               select: { userId: true, legalName: true },
             },
-            unit: {
-              select: {
-                unitNumber: true,
-                property: {
-                  select: { name: true, organisationId: true },
-                },
-              },
+            property: {
+              select: { name: true, organisationId: true },
             },
+            unit: {
+              select: { unitNumber: true },
+            },
+            rentalSpaceLabel: true,
           },
         },
       },
@@ -175,7 +313,11 @@ export class RentChargesProcessor extends WorkerHost {
       if (!userId) {
         continue;
       }
-      const property = charge.tenancy.unit.property;
+      const property = charge.tenancy.property;
+      const rentalSpace =
+        charge.tenancy.unit?.unitNumber ??
+        charge.tenancy.rentalSpaceLabel ??
+        'rental space';
       await this.notifications.enqueueEmail({
         userId,
         organisationId: property.organisationId,
@@ -184,7 +326,7 @@ export class RentChargesProcessor extends WorkerHost {
         text: [
           `Hello ${charge.tenancy.tenant.legalName},`,
           '',
-          `Your rent balance of RWF ${charge.balance.toFixed(2)} for ${property.name}, unit ${charge.tenancy.unit.unitNumber}, is due on ${charge.dueDate.toISOString().slice(0, 10)}.`,
+          `Your rent balance of RWF ${charge.balance.toFixed(2)} for ${property.name}, ${rentalSpace}, is due on ${charge.dueDate.toISOString().slice(0, 10)}.`,
           `Rent period: ${charge.period}.`,
           '',
           'Please contact your property manager if you have already made this payment.',

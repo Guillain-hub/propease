@@ -8,10 +8,13 @@ const nextConfig = {
   },
   outputFileTracingRoot: fileURLToPath(new URL(".", import.meta.url)),
   async rewrites() {
-    const apiOrigin = (process.env.API_ORIGIN ?? "http://localhost:4000").replace(
-      /\/+$/,
-      "",
+    const apiOriginUrl = new URL(
+      process.env.API_ORIGIN ?? "http://127.0.0.1:4000",
     );
+    if (apiOriginUrl.hostname === "localhost") {
+      apiOriginUrl.hostname = "127.0.0.1";
+    }
+    const apiOrigin = apiOriginUrl.toString().replace(/\/+$/, "");
     return [
       {
         source: "/api/v1/:path*",

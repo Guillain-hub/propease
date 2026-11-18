@@ -200,7 +200,7 @@ export class LandlordPermissionsGuard implements CanActivate {
               where: {
                 id,
                 organisationId,
-                tenancies: { some: { unit: { property: assignedProperty } } },
+                tenancies: { some: { property: assignedProperty } },
               },
               select: { id: true },
             }),
@@ -209,7 +209,7 @@ export class LandlordPermissionsGuard implements CanActivate {
         case 'tenancyId':
           permitted = Boolean(
             await this.prisma.tenancy.findFirst({
-              where: { id, unit: { property: assignedProperty } },
+              where: { id, property: assignedProperty },
               select: { id: true },
             }),
           );
@@ -217,7 +217,7 @@ export class LandlordPermissionsGuard implements CanActivate {
         case 'leaseId':
           permitted = Boolean(
             await this.prisma.lease.findFirst({
-              where: { id, tenancy: { unit: { property: assignedProperty } } },
+              where: { id, tenancy: { property: assignedProperty } },
               select: { id: true },
             }),
           );
@@ -234,7 +234,7 @@ export class LandlordPermissionsGuard implements CanActivate {
         case 'rentChargeId':
           permitted = Boolean(
             await this.prisma.rentCharge.findFirst({
-              where: { id, tenancy: { unit: { property: assignedProperty } } },
+              where: { id, tenancy: { property: assignedProperty } },
               select: { id: true },
             }),
           );
@@ -242,7 +242,7 @@ export class LandlordPermissionsGuard implements CanActivate {
         case 'depositId':
           permitted = Boolean(
             await this.prisma.deposit.findFirst({
-              where: { id, tenancy: { unit: { property: assignedProperty } } },
+              where: { id, tenancy: { property: assignedProperty } },
               select: { id: true },
             }),
           );
@@ -256,12 +256,12 @@ export class LandlordPermissionsGuard implements CanActivate {
                 allocations: {
                   some: {
                     rentCharge: {
-                      tenancy: { unit: { property: assignedProperty } },
+                      tenancy: { property: assignedProperty },
                     },
                   },
                   every: {
                     rentCharge: {
-                      tenancy: { unit: { property: assignedProperty } },
+                      tenancy: { property: assignedProperty },
                     },
                   },
                 },
@@ -297,7 +297,7 @@ export class LandlordPermissionsGuard implements CanActivate {
         case 'noticeId':
           permitted = Boolean(
             await this.prisma.notice.findFirst({
-              where: { id, tenancy: { unit: { property: assignedProperty } } },
+              where: { id, tenancy: { property: assignedProperty } },
               select: { id: true },
             }),
           );

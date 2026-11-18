@@ -18,9 +18,11 @@ import {
   ArrayMaxSize,
   IsArray,
   ArrayUnique,
+  IsBoolean,
   IsDateString,
   IsEmail,
   IsEnum,
+  IsIn,
   IsInt,
   IsOptional,
   IsString,
@@ -54,6 +56,10 @@ export class PropertyInput {
   description?: string;
 
   @IsOptional()
+  @IsEnum(PropertyStatus)
+  status?: PropertyStatus;
+
+  @IsOptional()
   @IsString()
   @Matches(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
   propertyOwnerId?: string;
@@ -62,6 +68,13 @@ export class PropertyInput {
   @IsString()
   @Matches(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
   photoFileId?: string;
+
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(100)
+  @ValidateNested({ each: true })
+  @Type(() => UnitInput)
+  units?: UnitInput[];
 }
 
 export class PropertyUpdateInput {
@@ -142,6 +155,62 @@ export class UnitInput {
   @IsOptional()
   @IsEnum(UnitStatus)
   status?: UnitStatus;
+}
+
+export class BatchUnitInput {
+  @IsArray()
+  @ArrayMaxSize(100)
+  @ValidateNested({ each: true })
+  @Type(() => UnitInput)
+  units!: UnitInput[];
+}
+
+export class AssignTenantInput {
+  @IsString()
+  @MinLength(2)
+  @MaxLength(180)
+  legalName!: string;
+
+  @IsString()
+  @MinLength(3)
+  @MaxLength(40)
+  phone!: string;
+
+  @IsDateString()
+  moveInDate!: string;
+
+  @IsDateString()
+  leaseExpiryDate!: string;
+
+  @Matches(moneyPattern)
+  rentAmount!: string;
+
+  @Matches(moneyPattern)
+  depositAmount!: string;
+
+  @IsInt()
+  @Min(1)
+  @Max(28)
+  dueDay!: number;
+
+  @IsBoolean()
+  rentReceived!: boolean;
+
+  @IsBoolean()
+  depositReceived!: boolean;
+
+  @IsOptional()
+  @IsEnum(PaymentMethod)
+  paymentMethod?: PaymentMethod;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(160)
+  reference?: string;
+
+  @IsOptional()
+  @IsDateString()
+  receivedAt?: string;
 }
 
 export class UnitUpdateInput {
@@ -414,6 +483,20 @@ export class PaymentInput {
   @Matches(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
   tenantId!: string;
 
+  @IsOptional()
+  @IsString()
+  @Matches(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
+  tenancyId?: string;
+
+  @IsOptional()
+  @IsIn(['FIFO'])
+  allocationStrategy?: 'FIFO';
+
+  @IsOptional()
+  @IsString()
+  @Matches(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
+  proofFileId?: string;
+
   @Matches(moneyPattern)
   amount!: string;
 
@@ -424,6 +507,11 @@ export class PaymentInput {
   @IsString()
   @MaxLength(160)
   reference?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(240)
+  note?: string;
 
   @IsDateString()
   receivedAt!: string;

@@ -24,7 +24,7 @@ describe('validateEnvironment', () => {
       PORT: 4000,
       NODE_ENV: 'development',
       APP_ORIGINS: 'http://localhost:3000',
-      REDIS_URL: 'redis://localhost:6379',
+      REDIS_URL: 'redis://127.0.0.1:6379',
       AWS_REGION: 'us-east-1',
     });
     expect(() =>

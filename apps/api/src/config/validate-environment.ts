@@ -64,7 +64,9 @@ export function validateEnvironment(
     throw new Error("APP_ORIGINS must be a comma-separated list of exact HTTP(S) origins");
   }
 
-  const redisUrl = new URL(String(environment.REDIS_URL ?? "redis://localhost:6379"));
+  const redisUrl = new URL(
+    String(environment.REDIS_URL ?? "redis://127.0.0.1:6379"),
+  );
   if (
     (redisUrl.protocol !== "redis:" && redisUrl.protocol !== "rediss:") ||
     !redisUrl.hostname

@@ -3,7 +3,9 @@ import {
   MembershipRole,
   PaymentMethod,
   Prisma,
+  PropertyStatus,
   PropertyType,
+  SubscriptionStatus,
 } from '@prisma/client';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ConfigService } from '@nestjs/config';
@@ -94,6 +96,7 @@ describe('LandlordService payment ledger', () => {
         tenantId: 'tenant-1',
         amount: '60.00',
         method: PaymentMethod.MOBILE_MONEY,
+        note: 'November 2026 rent',
         receivedAt: new Date().toISOString(),
         allocations: [{ rentChargeId: 'charge-1', amount: '60.00' }],
       },
@@ -117,6 +120,58 @@ describe('LandlordService payment ledger', () => {
         }),
       }),
     );
+    expect(tx.payment.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ note: 'November 2026 rent' }),
+      }),
+    );
+  });
+
+  it('rejects FIFO allocations that skip an older unpaid charge', async () => {
+    const tx = Object.assign(makeTransaction(), {
+      tenancy: {
+        findFirst: vi.fn().mockResolvedValue({ id: 'tenancy-1' }),
+      },
+    });
+    const dueDate = new Date('2026-01-01T00:00:00.000Z');
+    tx.rentCharge.findMany
+      .mockResolvedValueOnce([
+        {
+          id: 'charge-2',
+          tenancyId: 'tenancy-1',
+          balance: new Prisma.Decimal('100'),
+          dueDate,
+        },
+      ])
+      .mockResolvedValueOnce([
+        {
+          id: 'charge-1',
+          balance: new Prisma.Decimal('50'),
+        },
+        {
+          id: 'charge-2',
+          balance: new Prisma.Decimal('100'),
+        },
+      ]);
+    const { landlord } = serviceFor(tx);
+
+    await expect(
+      landlord.createPayment(
+        'organisation-1',
+        'user-1',
+        MembershipRole.OWNER,
+        {
+          tenantId: 'tenant-1',
+          tenancyId: 'tenancy-1',
+          allocationStrategy: 'FIFO',
+          amount: '50',
+          method: PaymentMethod.CASH,
+          receivedAt: new Date().toISOString(),
+          allocations: [{ rentChargeId: 'charge-2', amount: '50' }],
+        },
+      ),
+    ).rejects.toThrow('Payments must be allocated to outstanding charges oldest first');
+    expect(tx.payment.create).not.toHaveBeenCalled();
   });
 
   it('refuses to record a payment against another tenant’s charge', async () => {
@@ -220,6 +275,110 @@ describe('LandlordService payment ledger', () => {
     expect(tx.depositTransaction.create).toHaveBeenCalled();
     expect(tx.rentCharge.update).not.toHaveBeenCalled();
     expect(tx.payment.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('LandlordService tenant assignment', () => {
+  it('creates tenancy, lease, opening charge, payment and deposit receipt atomically', async () => {
+    const tx = Object.assign(makeTransaction(), {
+      unit: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: 'unit-1',
+          propertyId: 'property-1',
+          status: 'AVAILABLE',
+        }),
+        update: vi.fn().mockResolvedValue({}),
+      },
+      tenant: {
+        findFirst: vi.fn(),
+        create: vi.fn().mockResolvedValue({ id: 'tenant-1' }),
+      },
+      tenancy: {
+        findFirst: vi.fn().mockResolvedValue(null),
+        create: vi.fn().mockResolvedValue({
+          id: 'tenancy-1',
+          deposit: { id: 'deposit-1' },
+        }),
+      },
+      lease: { create: vi.fn().mockResolvedValue({ id: 'lease-1' }) },
+      rentCharge: {
+        create: vi.fn().mockResolvedValue({ id: 'charge-1' }),
+        findMany: vi.fn(),
+        update: vi.fn(),
+      },
+      payment: {
+        create: vi.fn().mockResolvedValue({ id: 'payment-1' }),
+        findFirst: vi.fn(),
+        update: vi.fn(),
+      },
+    });
+    const { landlord, prisma } = serviceFor(tx);
+
+    const result = await landlord.assignTenantToUnit(
+      'organisation-1',
+      'user-1',
+      MembershipRole.OWNER,
+      'unit-1',
+      {
+        legalName: 'Tenant Example',
+        phone: '+250780000000',
+        moveInDate: new Date().toISOString().slice(0, 10),
+        leaseExpiryDate: '2027-12-31',
+        rentAmount: '100000',
+        depositAmount: '100000',
+        dueDay: 1,
+        rentReceived: true,
+        depositReceived: true,
+        paymentMethod: PaymentMethod.CASH,
+        receivedAt: new Date().toISOString(),
+      },
+    );
+
+    expect(prisma.$transaction).toHaveBeenCalledOnce();
+    expect(tx.tenancy.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          deposit: {
+            create: expect.objectContaining({
+              requiredAmount: new Prisma.Decimal('100000'),
+              receivedAmount: new Prisma.Decimal('100000'),
+              heldBalance: new Prisma.Decimal('100000'),
+            }),
+          },
+        }),
+      }),
+    );
+    expect(tx.payment.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          tenantId: 'tenant-1',
+          tenancyId: 'tenancy-1',
+          amount: new Prisma.Decimal('100000'),
+          allocations: {
+            create: {
+              rentChargeId: 'charge-1',
+              allocatedAmount: new Prisma.Decimal('100000'),
+            },
+          },
+        }),
+      }),
+    );
+    expect(tx.depositTransaction.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          depositId: 'deposit-1',
+          type: DepositTransactionType.RECEIPT,
+          amount: new Prisma.Decimal('100000'),
+        }),
+      }),
+    );
+    expect(result).toMatchObject({
+      tenant: { id: 'tenant-1' },
+      tenancy: { id: 'tenancy-1' },
+      lease: { id: 'lease-1' },
+      charge: { id: 'charge-1' },
+      payment: { id: 'payment-1' },
+    });
   });
 });
 
@@ -363,6 +522,109 @@ describe('LandlordService team invitations', () => {
 });
 
 describe('LandlordService property photos', () => {
+  it('creates a property and its initial units in one quota-checked transaction', async () => {
+    const transaction = {
+      subscription: {
+        findUnique: vi.fn().mockResolvedValue({ id: 'subscription-1' }),
+        findUniqueOrThrow: vi.fn().mockResolvedValue({
+          status: SubscriptionStatus.ACTIVE,
+          plan: { unitLimit: 5 },
+        }),
+      },
+      unit: {
+        count: vi.fn().mockResolvedValue(1),
+        create: vi.fn().mockResolvedValue({ id: 'unit-1' }),
+      },
+      property: {
+        create: vi.fn().mockResolvedValue({ id: 'property-1' }),
+      },
+      auditLog: { create: vi.fn().mockResolvedValue({}) },
+    };
+    const prisma = {
+      $transaction: vi.fn(
+        async (
+          callback: (tx: typeof transaction) => Promise<unknown>,
+          _options?: unknown,
+        ) => callback(transaction),
+      ),
+    };
+    const service = new LandlordService(
+      prisma as unknown as PrismaService,
+      {} as unknown as EmailService,
+      {} as ConfigService,
+    );
+
+    const result = await service.createProperty(
+      'organisation-1',
+      'owner-1',
+      MembershipRole.OWNER,
+      {
+        name: 'Main house',
+        type: PropertyType.HOUSE,
+        address: 'Kigali, Rwanda',
+        status: PropertyStatus.INACTIVE,
+        units: [{
+          unitNumber: 'Main Residence',
+          rentAmount: '150000',
+          depositAmount: '150000',
+          bedrooms: 3,
+          bathrooms: 2,
+          sizeSqm: '120.5',
+        }],
+      },
+    );
+
+    expect(result.units).toEqual([{ id: 'unit-1' }]);
+    expect(transaction.property.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ status: PropertyStatus.INACTIVE }),
+    });
+    expect(transaction.unit.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        propertyId: 'property-1',
+        unitNumber: 'Main Residence',
+        rentAmount: new Prisma.Decimal('150000'),
+        depositAmount: new Prisma.Decimal('150000'),
+        bedrooms: 3,
+        bathrooms: 2,
+        sizeSqm: new Prisma.Decimal('120.5'),
+        status: 'AVAILABLE',
+      }),
+    });
+    expect(transaction.auditLog.create).toHaveBeenCalledTimes(2);
+    expect(prisma.$transaction).toHaveBeenCalledWith(
+      expect.any(Function),
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
+  });
+
+  it('requires house unit bedrooms, bathrooms and size', async () => {
+    const service = new LandlordService(
+      {} as unknown as PrismaService,
+      {} as unknown as EmailService,
+      {} as ConfigService,
+    );
+
+    await expect(
+      service.createProperty(
+        'organisation-1',
+        'owner-1',
+        MembershipRole.OWNER,
+        {
+          name: 'Main house',
+          type: PropertyType.HOUSE,
+          address: 'Kigali, Rwanda',
+          units: [{
+            unitNumber: 'Main Residence',
+            rentAmount: '150000',
+            depositAmount: '150000',
+          }],
+        },
+      ),
+    ).rejects.toThrow(
+      'House rental spaces require bedrooms, bathrooms and a positive size',
+    );
+  });
+
   it('links only an uploaded image from the same organisation to a property', async () => {
     const transaction = {
       storedFile: {

@@ -33,8 +33,34 @@ export class NotificationProcessor extends WorkerHost {
     if (!notification) {
       throw new Error(`Notification ${job.data.notificationId} was not found`);
     }
-    if (notification.status === 'SENT') {
+    if (notification.status !== 'QUEUED') {
       return;
+    }
+    if (
+      notification.template === 'rent_reminder' &&
+      notification.deduplicationKey?.startsWith('rent-reminder:')
+    ) {
+      const chargeId = notification.deduplicationKey.split(':')[1];
+      const charge = chargeId
+        ? await this.prisma.rentCharge.findFirst({
+            where: {
+              id: chargeId,
+              balance: { gt: 0 },
+              status: { in: ['PENDING', 'PARTIALLY_PAID', 'OVERDUE'] },
+              ...(notification.organisationId
+                ? { tenancy: { property: { organisationId: notification.organisationId } } }
+                : {}),
+            },
+            select: { id: true },
+          })
+        : null;
+      if (!charge) {
+        await this.prisma.notification.updateMany({
+          where: { id: notification.id, status: 'QUEUED' },
+          data: { status: 'CANCELLED' },
+        });
+        return;
+      }
     }
     if (notification.channel !== 'EMAIL') {
       throw new Error(

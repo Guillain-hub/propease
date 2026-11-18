@@ -93,12 +93,20 @@ type DashboardData = {
   organisation: Organisation["organisation"] | null;
   role: string;
   properties: Property[];
+  subscription: {
+    activeUnits: number;
+    subscription: {
+      plan: {
+        name: string;
+        unitLimit: number | null;
+      };
+    };
+  } | null;
   overview: OverviewData | null;
   invitations: Invitation[];
 };
 type ApiError = { message?: string | string[] };
 type SectionName =
-  | "Overview"
   | "Properties"
   | "Units"
   | "Tenants"
@@ -113,25 +121,21 @@ type SectionName =
   | "Team"
   | "Subscription"
   | "Settings";
+type DashboardSection =
+  | "Properties"
+  | "Team"
+  | "Reports"
+  | "Subscription"
+  | "Settings";
 
 const apiBaseUrl = (
   process.env.NEXT_PUBLIC_API_URL ?? "/api/v1"
 ).replace(/\/+$/, "");
 
-const navigation: { label: SectionName; icon: LucideIcon }[] = [
-  { label: "Overview", icon: LayoutDashboard },
+const navigation: { label: DashboardSection; icon: LucideIcon }[] = [
   { label: "Properties", icon: Building2 },
-  { label: "Units", icon: KeyRound },
-  { label: "Tenants", icon: Users },
-  { label: "Leases", icon: FileText },
-  { label: "Inspections", icon: ClipboardCheck },
-  { label: "Rent & Deposits", icon: CircleDollarSign },
-  { label: "Expenses", icon: Receipt },
-  { label: "Utilities", icon: Droplets },
-  { label: "Maintenance", icon: Wrench },
-  { label: "Notices", icon: Bell },
-  { label: "Reports", icon: BarChart3 },
   { label: "Team", icon: UsersRound },
+  { label: "Reports", icon: BarChart3 },
   { label: "Subscription", icon: CreditCard },
   { label: "Settings", icon: Settings },
 ];
@@ -183,8 +187,8 @@ function DashboardSearch({
 }: {
   organisationId?: string;
   properties: Property[];
-  visibleSections: SectionName[];
-  onNavigate: (section: SectionName) => void;
+  visibleSections: DashboardSection[];
+  onNavigate: (section: DashboardSection, propertySearch?: string) => void;
 }) {
   const searchInput = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState("");
@@ -244,8 +248,8 @@ function DashboardSearch({
     };
   }, [organisationId, query]);
 
-  function choose(section: SectionName) {
-    onNavigate(section);
+  function choose(section: DashboardSection, propertySearch?: string) {
+    onNavigate(section, propertySearch);
     setQuery("");
   }
 
@@ -264,9 +268,15 @@ function DashboardSearch({
             const destination = matchingProperties.length
               ? "Properties"
               : matchingTenants.length
-                ? "Tenants"
+                ? "Properties"
                 : matchingSections[0]?.label;
-            if (destination) choose(destination);
+            if (destination === "Properties" && matchingProperties.length) {
+              choose(destination, matchingProperties[0].name);
+            } else if (destination === "Properties" && matchingTenants.length) {
+              choose(destination, matchingTenants[0].legalName);
+            } else if (destination) {
+              choose(destination);
+            }
           }
         }}
       />
@@ -276,14 +286,14 @@ function DashboardSearch({
           {loading && <span className="dashboard-search-message">Searching…</span>}
           {searchError && <span className="dashboard-search-message">{searchError}</span>}
           {matchingProperties.map((property) => (
-            <button type="button" role="option" key={property.id} onClick={() => choose("Properties")}>
+            <button type="button" role="option" key={property.id} onClick={() => choose("Properties", property.name)}>
               <Building2 size={16} />
               <span><b>{property.name}</b><small>{property.address}</small></span>
               <small>Property</small>
             </button>
           ))}
           {matchingTenants.map((tenant) => (
-            <button type="button" role="option" key={tenant.id} onClick={() => choose("Tenants")}>
+            <button type="button" role="option" key={tenant.id} onClick={() => choose("Properties", tenant.legalName)}>
               <Users size={16} />
               <span><b>{tenant.legalName}</b><small>{tenant.email ?? tenant.phone ?? "Tenant"}</small></span>
               <small>Tenant</small>
@@ -342,13 +352,31 @@ export default function DashboardPage() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [activeSection, setActiveSection] = useState<SectionName>("Overview");
+  const [activeSection, setActiveSection] = useState<DashboardSection>("Properties");
+  const [propertySearchQuery, setPropertySearchQuery] = useState("");
+  const [portfolioPropertyId, setPortfolioPropertyId] = useState("");
   const sectionInitialized = useRef(false);
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [navigationOpen, setNavigationOpen] = useState(false);
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
+
+  useEffect(() => {
+    if (!navigationOpen) return;
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setNavigationOpen(false);
+    }
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [navigationOpen]);
 
   useEffect(() => {
     let active = true;
@@ -381,25 +409,29 @@ export default function DashboardPage() {
         const organisation = membership?.organisation ?? null;
         const role = membership?.role ?? "";
         const loadPortfolioOverview = ["OWNER", "ADMIN", "MANAGER"].includes(role);
-        const [properties, overview] = organisation && loadPortfolioOverview
-          ? await Promise.all([
-              requestJson<{ properties: Property[] }>(
-                `/organisations/${organisation.id}/properties`,
-              ),
-              requestJson<OverviewData>(
-                `/organisations/${organisation.id}/landlord`,
-              ),
-            ])
-          : [{ properties: [] }, null];
+        let properties: Property[] = [];
+        let overview: OverviewData | null = null;
+        let subscription: DashboardData["subscription"] = null;
+        if (organisation && loadPortfolioOverview) {
+          properties = (await requestJson<{ properties: Property[] }>(
+            `/organisations/${organisation.id}/properties`,
+          )).properties;
+          overview = await requestJson<OverviewData>(
+            `/organisations/${organisation.id}/landlord`,
+          );
+          if (["OWNER", "ADMIN"].includes(role)) {
+            subscription = await requestJson<DashboardData["subscription"]>(
+              `/organisations/${organisation.id}/landlord/subscription`,
+            );
+          }
+        }
 
         if (active) {
           if (!sectionInitialized.current) {
             setActiveSection(
               role === "ACCOUNTANT"
                 ? "Reports"
-                : role === "MAINTENANCE_STAFF"
-                  ? "Maintenance"
-                  : "Overview",
+                : "Properties",
             );
             sectionInitialized.current = true;
           }
@@ -407,7 +439,8 @@ export default function DashboardPage() {
             user: currentUser.user,
             organisation,
             role: membership?.role ?? "",
-            properties: properties.properties,
+            properties,
+            subscription,
             overview,
             invitations,
           });
@@ -500,36 +533,30 @@ export default function DashboardPage() {
     );
   }
 
-  const unitCount = data.properties.reduce(
-    (total, property) => total + property._count.units,
-    0,
-  );
   const visibleNavigation = navigation.filter(({ label }) => {
-    if (data.role === "ACCOUNTANT") {
-      return ["Rent & Deposits", "Expenses", "Utilities", "Reports"].includes(label);
-    }
-    if (data.role === "MAINTENANCE_STAFF") return label === "Maintenance";
-    if (data.role === "MANAGER") {
-      return !["Expenses", "Team", "Subscription", "Settings"].includes(label);
-    }
-    return data.role === "OWNER" || data.role === "ADMIN";
+    if (data.role === "ACCOUNTANT") return label === "Reports";
+    if (data.role === "MANAGER") return ["Properties", "Reports"].includes(label);
+    if (data.role === "MAINTENANCE_STAFF") return label === "Properties";
+    return ["OWNER", "ADMIN"].includes(data.role);
   });
   const canManageWorkspaceSettings = ["OWNER", "ADMIN"].includes(data.role);
   const canCreateProperties = ["OWNER", "ADMIN"].includes(data.role);
 
   return (
     <div className="landlord-dashboard">
-      {mobileMenuOpen && (
+      {navigationOpen && (
         <button
           type="button"
           className="dashboard-sidebar-backdrop"
           aria-label="Close navigation menu"
-          onClick={() => setMobileMenuOpen(false)}
+          onClick={() => setNavigationOpen(false)}
         />
       )}
       <aside
-        className={`landlord-sidebar${mobileMenuOpen ? " is-open" : ""}`}
+        id="landlord-dashboard-navigation"
+        className={`landlord-sidebar${navigationOpen ? " is-open" : ""}`}
         aria-label="Landlord dashboard navigation"
+        aria-hidden={!navigationOpen}
       >
         <div className="landlord-brand">
           <Image
@@ -543,7 +570,7 @@ export default function DashboardPage() {
             className="dashboard-close-menu"
             type="button"
             aria-label="Close navigation"
-            onClick={() => setMobileMenuOpen(false)}
+            onClick={() => setNavigationOpen(false)}
           >
             <X size={19} />
           </button>
@@ -556,13 +583,14 @@ export default function DashboardPage() {
               key={label}
               onClick={() => {
                 setActiveSection(label);
-                setMobileMenuOpen(false);
+                if (label === "Properties") setPropertySearchQuery("");
+                setNavigationOpen(false);
               }}
               type="button"
               aria-current={activeSection === label ? "page" : undefined}
             >
               <Icon size={18} strokeWidth={1.8} />
-              <span>{label === "Rent & Deposits" ? "Rent records" : label}</span>
+              <span>{label}</span>
             </button>
           ))}
         </nav>
@@ -577,23 +605,45 @@ export default function DashboardPage() {
           <button
             className="dashboard-menu-button"
             type="button"
-            aria-label="Open navigation"
-            onClick={() => setMobileMenuOpen(true)}
+            aria-label={navigationOpen ? "Close navigation" : "Open navigation"}
+            aria-expanded={navigationOpen}
+            aria-controls="landlord-dashboard-navigation"
+            onClick={() => setNavigationOpen((open) => !open)}
           >
-            <Menu size={21} />
+            {navigationOpen ? <X size={19} /> : <Menu size={21} />}
           </button>
           <div className="dashboard-breadcrumb">
             <span>Workspace</span>
             <span aria-hidden="true">/</span>
             <b>{activeSection}</b>
           </div>
+          <div className="dashboard-brand-context">
+            <strong>PropEase</strong>
+            <span>Rwanda Portfolio</span>
+          </div>
           {["OWNER", "ADMIN", "MANAGER"].includes(data.role) && (
             <DashboardSearch
               organisationId={data.organisation?.id}
               properties={data.properties}
               visibleSections={visibleNavigation.map(({ label }) => label)}
-              onNavigate={(section) => setActiveSection(section)}
+              onNavigate={(section, searchQuery) => {
+                setActiveSection(section);
+                if (section === "Properties") {
+                  setPropertySearchQuery(searchQuery ?? "");
+                }
+              }}
             />
+          )}
+          {activeSection === "Properties" && data.subscription && (
+            <span className="dashboard-plan-usage">
+              <strong>{data.subscription.subscription.plan.name}</strong>
+              <span>
+                {data.subscription.activeUnits}
+                {data.subscription.subscription.plan.unitLimit === null
+                  ? " units"
+                  : ` / ${data.subscription.subscription.plan.unitLimit} units`}
+              </span>
+            </span>
           )}
           <div className="dashboard-topbar-actions">
             <div className="dashboard-popover-anchor">
@@ -648,7 +698,7 @@ export default function DashboardPage() {
           </div>
         </header>
 
-        <div className="landlord-content">
+        <div className={`landlord-content${activeSection === "Properties" ? " is-property-command-center" : ""}`}>
           {!data.organisation ? (
             <PendingInvitations
               invitations={data.invitations}
@@ -659,15 +709,6 @@ export default function DashboardPage() {
               <h1>Workspace access needs an update</h1>
               <p>Your legacy Staff role has been restricted. Ask an organisation owner or administrator to assign you a specific role.</p>
             </section>
-          ) : activeSection === "Overview" ? (
-            <Overview
-              data={data}
-              unitCount={unitCount}
-              overview={data.overview}
-              canAddProperty={canCreateProperties}
-              onOpenProperties={() => setActiveSection("Properties")}
-              onOpenSection={setActiveSection}
-            />
           ) : (
             <LandlordSectionWorkspace
               section={activeSection}
@@ -675,6 +716,9 @@ export default function DashboardPage() {
               currency={data.organisation?.currency ?? "RWF"}
               role={data.role}
               userId={data.user.id}
+              portfolioPropertyId={portfolioPropertyId}
+              onPortfolioPropertyChange={setPortfolioPropertyId}
+              initialPropertySearch={propertySearchQuery}
               onUpdated={() => setRefreshKey((key) => key + 1)}
             />
           )}

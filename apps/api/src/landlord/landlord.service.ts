@@ -19,6 +19,8 @@ import {
   MembershipRole,
   MembershipStatus,
   Prisma,
+  PropertyStatus,
+  PropertyType,
   RentChargeStatus,
   SubscriptionStatus,
   TenancyStatus,
@@ -27,7 +29,10 @@ import {
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { PrismaService } from '../database/prisma.service.js';
 import { EmailService } from '../email/email.service.js';
+import { applyUnallocatedPaymentCredits } from '../rent-charges/rent-credits.js';
 import {
+  AssignTenantInput,
+  BatchUnitInput,
   ChargeInput,
   DepositTransactionInput,
   ExpenseInput,
@@ -58,6 +63,7 @@ import {
   UnitUpdateInput,
   UtilityInput,
 } from './dto/landlord.dto.js';
+import { assertWholeFrancsIfRwf } from './financial-amount.js';
 import { ensureTrialSubscription } from './trial-subscription.js';
 
 const managers = new Set<MembershipRole>([
@@ -107,7 +113,7 @@ function tenancyPropertyScope(
   role?: MembershipRole,
   userId?: string,
 ): Prisma.TenancyWhereInput {
-  return { unit: { property: propertyScopeWhere(organisationId, role, userId) } };
+  return { property: propertyScopeWhere(organisationId, role, userId) };
 }
 
 async function setPropertyAssignments(
@@ -251,7 +257,7 @@ export class LandlordService {
       const affectedUnitIds = new Set([
         ...endedTenancies.map(({ unitId }) => unitId),
         ...activeTenancies.map(({ unitId }) => unitId),
-      ]);
+      ].filter((unitId): unitId is string => unitId !== null));
       if (affectedUnitIds.size > 0) {
         const currentTenancies = await transaction.tenancy.findMany({
           where: {
@@ -262,7 +268,11 @@ export class LandlordService {
           },
           select: { unitId: true },
         });
-        const occupiedUnitIds = new Set(currentTenancies.map(({ unitId }) => unitId));
+        const occupiedUnitIds = new Set(
+          currentTenancies
+            .map(({ unitId }) => unitId)
+            .filter((unitId): unitId is string => unitId !== null),
+        );
         const availableUnitIds = [...affectedUnitIds].filter((id) => !occupiedUnitIds.has(id));
         if (occupiedUnitIds.size > 0) {
           await transaction.unit.updateMany({
@@ -606,6 +616,20 @@ export class LandlordService {
     if (role === MembershipRole.MANAGER) {
       throw new ForbiddenException('Property managers can manage only their assigned properties');
     }
+    if (
+      input.type === PropertyType.HOUSE &&
+      input.units?.some((unit) =>
+        unit.bedrooms === undefined ||
+        unit.bathrooms === undefined ||
+        unit.sizeSqm === undefined ||
+        !/^\d{1,8}(\.\d{1,2})?$/.test(unit.sizeSqm) ||
+        Number(unit.sizeSqm) <= 0
+      )
+    ) {
+      throw new BadRequestException(
+        'House rental spaces require bedrooms, bathrooms and a positive size in square metres',
+      );
+    }
     if (input.propertyOwnerId) {
       const owner = await this.prisma.propertyOwner.findFirst({
         where: { id: input.propertyOwnerId, organisationId },
@@ -613,7 +637,14 @@ export class LandlordService {
       });
       if (!owner) throw new NotFoundException('Property owner was not found in this organisation');
     }
-    const property = await this.prisma.$transaction(async (transaction) => {
+    const result = await this.prisma.$transaction(async (transaction) => {
+      if (input.units?.length) {
+        await assertWholeFrancsIfRwf(
+          transaction,
+          organisationId,
+          input.units.flatMap((unit) => [unit.rentAmount, unit.depositAmount]),
+        );
+      }
       if (input.photoFileId) {
         const photo = await transaction.storedFile.findFirst({
           where: {
@@ -635,12 +666,60 @@ export class LandlordService {
           type: input.type,
           address: input.address.trim(),
           description: input.description?.trim() || null,
+          status: input.status ?? PropertyStatus.ACTIVE,
         },
       });
       await addAudit(transaction, organisationId, userId, 'property.created', 'property', created.id);
-      return created;
-    });
-    return { property };
+      const units: Prisma.UnitGetPayload<object>[] = [];
+      if (input.units?.length) {
+        await ensureTrialSubscription(transaction, organisationId);
+        const subscription = await transaction.subscription.findUniqueOrThrow({
+          where: { organisationId },
+          include: { plan: { select: { unitLimit: true } } },
+        });
+        const activeUnitCount = await transaction.unit.count({
+          where: {
+            property: { organisationId },
+            status: { not: UnitStatus.ARCHIVED },
+          },
+        });
+        const requestedUnitCount = input.units.length;
+        if (subscription.status === SubscriptionStatus.EXPIRED) {
+          throw new ForbiddenException('Your trial has expired. Select a plan to add more units.');
+        }
+        if (
+          subscription.plan.unitLimit !== null &&
+          activeUnitCount + requestedUnitCount > subscription.plan.unitLimit
+        ) {
+          throw new ForbiddenException(
+            `Your current plan allows up to ${subscription.plan.unitLimit} active units`,
+          );
+        }
+
+        for (const unitInput of input.units) {
+          const unit = await transaction.unit.create({
+            data: {
+              propertyId: created.id,
+              unitNumber: unitInput.unitNumber.trim(),
+              floor: unitInput.floor?.trim() || null,
+              bedrooms: unitInput.bedrooms,
+              bathrooms: unitInput.bathrooms,
+              sizeSqm: unitInput.sizeSqm === undefined ? null : new Prisma.Decimal(unitInput.sizeSqm),
+              utilityArrangement: unitInput.utilityArrangement?.trim() || null,
+              rentAmount: amount(unitInput.rentAmount, 'Rent'),
+              depositAmount: new Prisma.Decimal(unitInput.depositAmount),
+              status: UnitStatus.AVAILABLE,
+            },
+          });
+          units.push(unit);
+          await addAudit(transaction, organisationId, userId, 'unit.created', 'unit', unit.id);
+        }
+      }
+      return { property: created, units };
+    }, input.units?.length
+      ? { isolationLevel: Prisma.TransactionIsolationLevel.Serializable }
+      : undefined);
+    return result;
   }
 
   async updateProperty(
@@ -762,6 +841,11 @@ export class LandlordService {
 
     try {
       const unit = await this.prisma.$transaction(async (transaction) => {
+        await assertWholeFrancsIfRwf(
+          transaction,
+          organisationId,
+          [input.rentAmount, input.depositAmount],
+        );
         await ensureTrialSubscription(transaction, organisationId);
         const subscription = await transaction.subscription.findUniqueOrThrow({
           where: { organisationId },
@@ -807,6 +891,273 @@ export class LandlordService {
       if (isUniqueConflict(error)) throw new ConflictException('That unit number already exists at this property');
       throw error;
     }
+  }
+
+  async createUnits(
+    organisationId: string,
+    userId: string,
+    role: MembershipRole | undefined,
+    propertyId: string,
+    input: BatchUnitInput,
+  ) {
+    assertCanManage(role);
+    if (!input.units.length) throw new BadRequestException('Add at least one unit');
+    const unitNumbers = input.units.map((unit) => unit.unitNumber.trim().toLowerCase());
+    if (new Set(unitNumbers).size !== unitNumbers.length) {
+      throw new BadRequestException('Each unit in the batch must have a unique unit number');
+    }
+    const property = await this.prisma.property.findFirst({
+      where: {
+        id: propertyId,
+        ...propertyScopeWhere(organisationId, role, userId),
+      },
+      select: { id: true },
+    });
+    if (!property) throw new NotFoundException('Property was not found in this organisation');
+
+    try {
+      const units = await this.prisma.$transaction(async (transaction) => {
+        await assertWholeFrancsIfRwf(
+          transaction,
+          organisationId,
+          input.units.flatMap((unit) => [unit.rentAmount, unit.depositAmount]),
+        );
+        await ensureTrialSubscription(transaction, organisationId);
+        const subscription = await transaction.subscription.findUniqueOrThrow({
+          where: { organisationId },
+          include: { plan: { select: { unitLimit: true } } },
+        });
+        const activeUnitCount = await transaction.unit.count({
+          where: {
+            property: { organisationId },
+            status: { not: UnitStatus.ARCHIVED },
+          },
+        });
+        if (subscription.status === SubscriptionStatus.EXPIRED) {
+          throw new ForbiddenException('Your trial has expired. Select a plan to add more units.');
+        }
+        if (
+          subscription.plan.unitLimit !== null &&
+          activeUnitCount + input.units.length > subscription.plan.unitLimit
+        ) {
+          throw new ForbiddenException(
+            `Your current plan allows up to ${subscription.plan.unitLimit} active units`,
+          );
+        }
+
+        const createdUnits = [];
+        for (const unit of input.units) {
+          const created = await transaction.unit.create({
+            data: {
+              propertyId,
+              unitNumber: unit.unitNumber.trim(),
+              floor: unit.floor?.trim() || null,
+              bedrooms: unit.bedrooms,
+              bathrooms: unit.bathrooms,
+              sizeSqm: unit.sizeSqm === undefined ? null : new Prisma.Decimal(unit.sizeSqm),
+              utilityArrangement: unit.utilityArrangement?.trim() || null,
+              rentAmount: amount(unit.rentAmount, 'Rent'),
+              depositAmount: new Prisma.Decimal(unit.depositAmount),
+              status: unit.status ?? UnitStatus.AVAILABLE,
+            },
+          });
+          await addAudit(transaction, organisationId, userId, 'unit.created', 'unit', created.id);
+          createdUnits.push(created);
+        }
+        return createdUnits;
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+      return { units };
+    } catch (error) {
+      if (isUniqueConflict(error)) {
+        throw new ConflictException('A unit number already exists at this property');
+      }
+      throw error;
+    }
+  }
+
+  async assignTenantToUnit(
+    organisationId: string,
+    userId: string,
+    role: MembershipRole | undefined,
+    unitId: string,
+    input: AssignTenantInput,
+  ) {
+    assertCanManage(role);
+    if (input.rentReceived && !input.paymentMethod) {
+      throw new BadRequestException('Select a payment channel for rent received');
+    }
+    const moveInDate = dateOnly(input.moveInDate);
+    const leaseExpiryDate = dateOnly(input.leaseExpiryDate);
+    if (leaseExpiryDate < moveInDate) {
+      throw new BadRequestException('Lease expiry cannot be before move-in');
+    }
+    if (input.dueDay > 28) throw new BadRequestException('Rent due day must be between 1 and 28');
+
+    const result = await this.prisma.$transaction(async (transaction) => {
+      await assertWholeFrancsIfRwf(transaction, organisationId, [
+        input.rentAmount,
+        input.depositAmount,
+      ]);
+      const unit = await transaction.unit.findFirst({
+        where: {
+          id: unitId,
+          property: propertyScopeWhere(organisationId, role, userId),
+        },
+        select: {
+          id: true,
+          propertyId: true,
+          status: true,
+        },
+      });
+      if (!unit) throw new NotFoundException('Unit was not found in this organisation');
+      if (unit.status === UnitStatus.ARCHIVED || unit.status === UnitStatus.UNAVAILABLE) {
+        throw new ConflictException('This unit is not available for a tenancy');
+      }
+
+      const conflictingTenancy = await transaction.tenancy.findFirst({
+        where: {
+          unitId,
+          status: { in: [TenancyStatus.UPCOMING, TenancyStatus.ACTIVE] },
+          moveInDate: { lte: leaseExpiryDate },
+          OR: [{ moveOutDate: null }, { moveOutDate: { gte: moveInDate } }],
+        },
+        select: { id: true },
+      });
+      if (conflictingTenancy) {
+        throw new ConflictException('This unit already has a tenancy during those dates');
+      }
+
+      const rentAmount = amount(input.rentAmount, 'Rent');
+      const depositAmount = new Prisma.Decimal(input.depositAmount);
+      if (!depositAmount.isFinite() || depositAmount.lt(0)) {
+        throw new BadRequestException('Deposit must be zero or greater');
+      }
+      const today = dateOnly(new Date().toISOString());
+      const tenancyStatus = moveInDate > today
+        ? TenancyStatus.UPCOMING
+        : TenancyStatus.ACTIVE;
+      const tenant = await transaction.tenant.create({
+        data: {
+          organisationId,
+          legalName: input.legalName.trim(),
+          phone: input.phone.trim(),
+        },
+      });
+      const tenancy = await transaction.tenancy.create({
+        data: {
+          tenantId: tenant.id,
+          propertyId: unit.propertyId,
+          unitId: unit.id,
+          moveInDate,
+          moveOutDate: leaseExpiryDate,
+          status: tenancyStatus,
+          deposit: {
+            create: {
+              requiredAmount: depositAmount,
+              receivedAmount: input.depositReceived ? depositAmount : new Prisma.Decimal(0),
+              heldBalance: input.depositReceived ? depositAmount : new Prisma.Decimal(0),
+              status: input.depositReceived && !depositAmount.isZero()
+                ? DepositStatus.HELD
+                : DepositStatus.NOT_RECEIVED,
+            },
+          },
+        },
+        include: { deposit: true },
+      });
+      const signedAt = new Date();
+      const lease = await transaction.lease.create({
+        data: {
+          tenancyId: tenancy.id,
+          startDate: moveInDate,
+          endDate: leaseExpiryDate,
+          rentAmount,
+          dueDay: input.dueDay,
+          status: LeaseStatus.ACTIVE,
+          signedAt,
+        },
+      });
+      const period = input.moveInDate.slice(0, 7);
+      const dueDate = dateOnly(input.moveInDate);
+      const charge = await transaction.rentCharge.create({
+        data: {
+          tenancyId: tenancy.id,
+          period,
+          dueDate,
+          amount: rentAmount,
+          balance: input.rentReceived ? new Prisma.Decimal(0) : rentAmount,
+          status: input.rentReceived
+            ? RentChargeStatus.PAID
+            : dueDate < today
+              ? RentChargeStatus.OVERDUE
+              : RentChargeStatus.PENDING,
+        },
+      });
+
+      let payment: { id: string } | null = null;
+      if (input.rentReceived) {
+        payment = await transaction.payment.create({
+          data: {
+            organisationId,
+            tenantId: tenant.id,
+            tenancyId: tenancy.id,
+            amount: rentAmount,
+            method: input.paymentMethod!,
+            reference: input.reference?.trim() || null,
+            receivedAt: input.receivedAt ? new Date(input.receivedAt) : new Date(),
+            recordedBy: userId,
+            allocations: {
+              create: {
+                rentChargeId: charge.id,
+                allocatedAmount: rentAmount,
+              },
+            },
+          },
+        });
+        await addAudit(
+          transaction,
+          organisationId,
+          userId,
+          'payment.recorded',
+          'payment',
+          payment.id,
+          { amount: rentAmount.toString(), allocationCount: 1, manualRecord: true },
+        );
+      }
+      if (input.depositReceived && !depositAmount.isZero()) {
+        await transaction.depositTransaction.create({
+          data: {
+            depositId: tenancy.deposit!.id,
+            type: DepositTransactionType.RECEIPT,
+            amount: depositAmount,
+            date: input.receivedAt ? dateOnly(input.receivedAt) : today,
+            reason: 'Security deposit received during tenant assignment',
+            recordedBy: userId,
+          },
+        });
+        await addAudit(
+          transaction,
+          organisationId,
+          userId,
+          'deposit.transaction_recorded',
+          'deposit',
+          tenancy.deposit!.id,
+          { transactionType: DepositTransactionType.RECEIPT, amount: depositAmount.toString() },
+        );
+      }
+      if (tenancyStatus === TenancyStatus.ACTIVE) {
+        await transaction.unit.update({
+          where: { id: unit.id },
+          data: { status: UnitStatus.OCCUPIED },
+        });
+      }
+
+      await addAudit(transaction, organisationId, userId, 'tenant.created', 'tenant', tenant.id);
+      await addAudit(transaction, organisationId, userId, 'tenancy.created', 'tenancy', tenancy.id);
+      await addAudit(transaction, organisationId, userId, 'lease.created', 'lease', lease.id);
+      await addAudit(transaction, organisationId, userId, 'rent_charge.created', 'rent_charge', charge.id);
+      return { tenant, tenancy, lease, charge, payment };
+    }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
+    return result;
   }
 
   async updateUnit(
@@ -864,6 +1215,11 @@ export class LandlordService {
             throw new ConflictException('A unit with a current tenancy cannot change availability status');
           }
         }
+        await assertWholeFrancsIfRwf(
+          transaction,
+          organisationId,
+          [input.rentAmount, input.depositAmount],
+        );
         const updated = await transaction.unit.update({
           where: { id: unitId },
           data: {
@@ -1150,6 +1506,7 @@ export class LandlordService {
             },
           },
           unit: { select: { id: true, unitNumber: true, property: { select: { id: true, name: true } } } },
+          property: { select: { id: true, name: true } },
           leases: { orderBy: { endDate: 'desc' }, take: 1 },
           deposit: { select: { id: true, requiredAmount: true, heldBalance: true, status: true } },
         },
@@ -1190,6 +1547,7 @@ export class LandlordService {
       const conflicting = await transaction.tenancy.findFirst({
         where: {
           unitId: unit.id,
+          propertyId: unit.propertyId,
           status: { in: [TenancyStatus.UPCOMING, TenancyStatus.ACTIVE] },
           moveInDate: { lte: moveOutDate ?? new Date('9999-12-31T00:00:00.000Z') },
           OR: [{ moveOutDate: null }, { moveOutDate: { gte: moveInDate } }],
@@ -1207,6 +1565,7 @@ export class LandlordService {
       const created = await transaction.tenancy.create({
         data: {
           tenantId: tenant.id,
+          propertyId: unit.propertyId,
           unitId: unit.id,
           moveInDate,
           moveOutDate,
@@ -1276,7 +1635,8 @@ export class LandlordService {
           },
         });
       }
-      const otherCurrentTenancy = await transaction.tenancy.findFirst({
+      const otherCurrentTenancy = existing.unitId
+        ? await transaction.tenancy.findFirst({
         where: {
           unitId: existing.unitId,
           id: { not: tenancyId },
@@ -1287,8 +1647,9 @@ export class LandlordService {
             { moveOutDate: { gt: dateOnly(new Date().toISOString()) } },
           ],
         },
-      });
-      if (hasMovedOut && !otherCurrentTenancy) {
+          })
+        : null;
+      if (hasMovedOut && existing.unitId && !otherCurrentTenancy) {
         await transaction.unit.update({
           where: { id: existing.unitId },
           data: { status: UnitStatus.AVAILABLE },
@@ -1319,7 +1680,22 @@ export class LandlordService {
             select: {
               id: true,
               tenant: { select: { id: true, legalName: true } },
-              unit: { select: { unitNumber: true, property: { select: { name: true } } } },
+              property: { select: { id: true, name: true } },
+              unit: { select: { id: true, unitNumber: true } },
+            },
+          },
+          tenantLeaseOnboarding: {
+            select: {
+              id: true,
+              expiresAt: true,
+              generation: true,
+              responseAt: true,
+              responseAction: true,
+              responseNote: true,
+              snapshots: {
+                select: { id: true, version: true, agreement: true, createdAt: true },
+                orderBy: { version: 'desc' },
+              },
             },
           },
         },
@@ -1338,12 +1714,23 @@ export class LandlordService {
     const startDate = dateOnly(input.startDate);
     const endDate = dateOnly(input.endDate);
     if (endDate < startDate) throw new BadRequestException('Lease end date must be on or after its start date');
+    if (
+      input.status === LeaseStatus.PENDING_TENANT_REVIEW ||
+      input.status === LeaseStatus.CHANGES_REQUESTED ||
+      input.status === LeaseStatus.TENANT_ACCEPTED ||
+      input.status === LeaseStatus.TENANT_DECLINED
+    ) {
+      throw new BadRequestException(
+        'Tenant review statuses can only be set through lease onboarding',
+      );
+    }
     if (input.status === LeaseStatus.ACTIVE && !input.signedAt) {
       throw new BadRequestException('A signed date is required before activating a lease');
     }
     const lease = await this.prisma.$transaction(async (transaction) => {
+      await assertWholeFrancsIfRwf(transaction, organisationId, [input.rentAmount]);
       const tenancy = await transaction.tenancy.findFirst({
-        where: { id: input.tenancyId, unit: { property: { organisationId } } },
+        where: { id: input.tenancyId, property: { organisationId } },
         select: { id: true, status: true },
       });
       if (!tenancy) throw new NotFoundException('Tenancy was not found in this organisation');
@@ -1389,12 +1776,25 @@ export class LandlordService {
     assertCanManage(role);
     const lease = await this.prisma.$transaction(async (transaction) => {
       const existing = await transaction.lease.findFirst({
-        where: { id: leaseId, tenancy: { unit: { property: { organisationId } } } },
+        where: { id: leaseId, tenancy: { property: { organisationId } } },
       });
       if (!existing) throw new NotFoundException('Lease was not found in this organisation');
       const today = dateOnly(new Date().toISOString());
       const allowedStatusChanges: Record<LeaseStatus, LeaseStatus[]> = {
         DRAFT: [LeaseStatus.DRAFT, LeaseStatus.ACTIVE, LeaseStatus.TERMINATED],
+        PENDING_TENANT_REVIEW: [
+          LeaseStatus.PENDING_TENANT_REVIEW,
+          LeaseStatus.TERMINATED,
+        ],
+        CHANGES_REQUESTED: [
+          LeaseStatus.CHANGES_REQUESTED,
+          LeaseStatus.TERMINATED,
+        ],
+        TENANT_ACCEPTED: [
+          LeaseStatus.TENANT_ACCEPTED,
+          LeaseStatus.TERMINATED,
+        ],
+        TENANT_DECLINED: [LeaseStatus.TENANT_DECLINED, LeaseStatus.TERMINATED],
         ACTIVE: [LeaseStatus.ACTIVE, LeaseStatus.EXPIRED, LeaseStatus.TERMINATED],
         EXPIRED: [LeaseStatus.EXPIRED],
         TERMINATED: [LeaseStatus.TERMINATED],
@@ -1445,7 +1845,7 @@ export class LandlordService {
     assertCanManage(role);
     const document = await this.prisma.$transaction(async (transaction) => {
       const lease = await transaction.lease.findFirst({
-        where: { id: leaseId, tenancy: { unit: { property: { organisationId } } } },
+        where: { id: leaseId, tenancy: { property: { organisationId } } },
         select: { id: true },
       });
       if (!lease) throw new NotFoundException('Lease was not found in this organisation');
@@ -1490,7 +1890,12 @@ export class LandlordService {
         where: { unit: { property: propertyScopeWhere(organisationId, role, userId) } },
         include: {
           unit: { select: { id: true, unitNumber: true, property: { select: { name: true } } } },
-          tenancy: { select: { tenant: { select: { legalName: true } } } },
+          tenancy: {
+            select: {
+              id: true,
+              tenant: { select: { legalName: true } },
+            },
+          },
           items: true,
           media: { select: { id: true, fileId: true, caption: true } },
         },
@@ -1632,6 +2037,7 @@ export class LandlordService {
         if (!tenancy || tenancy.status === TenancyStatus.ENDED || tenancy.status === TenancyStatus.TERMINATED) {
           throw new NotFoundException('Active tenancy was not found in this organisation');
         }
+        await assertWholeFrancsIfRwf(transaction, organisationId, [input.amount]);
         const value = amount(input.amount, 'Charge');
         const created = await transaction.rentCharge.create({
           data: {
@@ -1646,8 +2052,16 @@ export class LandlordService {
           },
         });
         await addAudit(transaction, organisationId, userId, 'rent_charge.created', 'rent_charge', created.id);
-        return created;
-      });
+        const appliedCredit = await applyUnallocatedPaymentCredits(
+          transaction,
+          created.id,
+          organisationId,
+          userId,
+        );
+        return appliedCredit.gt(0)
+          ? transaction.rentCharge.findUniqueOrThrow({ where: { id: created.id } })
+          : created;
+      }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
       return { charge };
     } catch (error) {
       if (isUniqueConflict(error)) {
@@ -1667,7 +2081,7 @@ export class LandlordService {
     assertCanManage(role);
     const charge = await this.prisma.$transaction(async (transaction) => {
       const existing = await transaction.rentCharge.findFirst({
-        where: { id: chargeId, tenancy: { unit: { property: { organisationId } } } },
+        where: { id: chargeId, tenancy: { property: { organisationId } } },
         include: { allocations: { where: { payment: { reversedAt: null } } } },
       });
       if (!existing) throw new NotFoundException('Rent charge was not found in this organisation');
@@ -1696,18 +2110,46 @@ export class LandlordService {
           organisationId,
           ...(role === MembershipRole.MANAGER
             ? {
-                allocations: {
-                  some: {
-                    rentCharge: {
-                      tenancy: tenancyPropertyScope(organisationId, role, userId),
+                OR: [
+                  {
+                    allocations: {
+                      some: {
+                        rentCharge: {
+                          tenancy: tenancyPropertyScope(organisationId, role, userId),
+                        },
+                      },
                     },
                   },
-                },
+                  { tenancy: { is: tenancyPropertyScope(organisationId, role, userId) } },
+                ],
               }
             : {}),
         },
         include: {
           tenant: { select: { id: true, legalName: true } },
+          recorder: {
+            select: {
+              name: true,
+              memberships: {
+                where: { organisationId },
+                select: { role: true },
+                take: 1,
+              },
+            },
+          },
+          tenancy: {
+            select: {
+              id: true,
+              unit: {
+                select: {
+                  unitNumber: true,
+                  propertyId: true,
+                  property: { select: { name: true } },
+                },
+              },
+            },
+          },
+          proofFile: { select: { id: true, fileName: true, mimeType: true } },
           allocations: {
             where:
               role === MembershipRole.MANAGER
@@ -1717,7 +2159,21 @@ export class LandlordService {
                     },
                   }
                 : undefined,
-            include: { rentCharge: { select: { id: true, period: true, amount: true } } },
+            include: {
+              rentCharge: {
+                select: {
+                  id: true,
+                  period: true,
+                  amount: true,
+                  tenancy: {
+                    select: {
+                      id: true,
+                      unit: { select: { propertyId: true } },
+                    },
+                  },
+                },
+              },
+            },
           },
         },
         orderBy: { receivedAt: 'desc' },
@@ -1745,11 +2201,43 @@ export class LandlordService {
     }
 
     const payment = await this.prisma.$transaction(async (transaction) => {
+      await assertWholeFrancsIfRwf(transaction, organisationId, [
+        input.amount,
+        ...input.allocations.map((allocation) => allocation.amount),
+      ]);
       const tenant = await transaction.tenant.findFirst({
         where: { id: input.tenantId, organisationId },
         select: { id: true },
       });
       if (!tenant) throw new NotFoundException('Tenant was not found in this organisation');
+      const tenancy = input.tenancyId
+        ? await transaction.tenancy.findFirst({
+            where: {
+              id: input.tenancyId,
+              tenantId: tenant.id,
+              status: TenancyStatus.ACTIVE,
+              property: { organisationId },
+            },
+            select: { id: true },
+          })
+        : null;
+      if (input.tenancyId && !tenancy) {
+        throw new NotFoundException('Active tenancy was not found for this tenant');
+      }
+      if (input.proofFileId) {
+        const proofFile = await transaction.storedFile.findFirst({
+          where: {
+            id: input.proofFileId,
+            organisationId,
+            uploadStatus: 'UPLOADED',
+            mimeType: { in: ['application/pdf', 'image/jpeg', 'image/png', 'image/webp'] },
+          },
+          select: { id: true },
+        });
+        if (!proofFile) {
+          throw new BadRequestException('Select a successfully uploaded payment receipt or screenshot');
+        }
+      }
       const charges = await transaction.rentCharge.findMany({
         where: {
           id: { in: input.allocations.map(({ rentChargeId }) => rentChargeId) },
@@ -1759,7 +2247,7 @@ export class LandlordService {
           },
           status: { not: RentChargeStatus.VOID },
         },
-        select: { id: true, balance: true, dueDate: true },
+        select: { id: true, tenancyId: true, balance: true, dueDate: true },
       });
       if (charges.length !== input.allocations.length) {
         throw new NotFoundException('One or more rent charges do not belong to this tenant');
@@ -1771,14 +2259,56 @@ export class LandlordService {
           throw new ConflictException('An allocation cannot exceed its rent charge balance');
         }
       }
+      if (input.allocationStrategy === 'FIFO') {
+        if (!tenancy) {
+          throw new BadRequestException('A tenancy is required for oldest-first payment allocation');
+        }
+        if (charges.some((charge) => charge.tenancyId !== tenancy.id)) {
+          throw new BadRequestException('FIFO allocations must belong to the selected tenancy');
+        }
+        const openCharges = await transaction.rentCharge.findMany({
+          where: {
+            tenancyId: tenancy.id,
+            status: { not: RentChargeStatus.VOID },
+            balance: { gt: 0 },
+          },
+          select: { id: true, balance: true },
+          orderBy: [{ dueDate: 'asc' }, { period: 'asc' }],
+        });
+        let remainingPayment = paymentAmount;
+        const expectedAllocations: Array<{ rentChargeId: string; amount: Prisma.Decimal }> = [];
+        for (const charge of openCharges) {
+          if (remainingPayment.isZero()) break;
+          const allocation = charge.balance.lt(remainingPayment)
+            ? charge.balance
+            : remainingPayment;
+          expectedAllocations.push({ rentChargeId: charge.id, amount: allocation });
+          remainingPayment = remainingPayment.minus(allocation);
+        }
+        if (
+          expectedAllocations.length !== input.allocations.length ||
+          expectedAllocations.some((expected, index) =>
+            input.allocations[index].rentChargeId !== expected.rentChargeId ||
+            !amount(input.allocations[index].amount, 'Allocation').eq(expected.amount),
+          )
+        ) {
+          throw new BadRequestException('Payments must be allocated to outstanding charges oldest first');
+        }
+      }
 
+      const allocationTenancyIds = new Set(charges.map((charge) => charge.tenancyId));
+      const paymentTenancyId = tenancy?.id ??
+        (allocationTenancyIds.size === 1 ? [...allocationTenancyIds][0] : undefined);
       const created = await transaction.payment.create({
         data: {
           organisationId,
           tenantId: tenant.id,
+          tenancyId: paymentTenancyId,
+          proofFileId: input.proofFileId,
           amount: paymentAmount,
           method: input.method,
           reference: input.reference?.trim() || null,
+          note: input.note?.trim() || null,
           receivedAt: new Date(input.receivedAt),
           recordedBy: userId,
         },
@@ -1805,10 +2335,20 @@ export class LandlordService {
                 : RentChargeStatus.PARTIALLY_PAID,
           },
         });
+        if (balance.isZero()) {
+          await transaction.notification.updateMany({
+            where: {
+              deduplicationKey: { startsWith: `rent-reminder:${charge.id}:` },
+              status: 'QUEUED',
+            },
+            data: { status: 'CANCELLED' },
+          });
+        }
       }
       await addAudit(transaction, organisationId, userId, 'payment.recorded', 'payment', created.id, {
         amount: paymentAmount.toString(),
         allocationCount: input.allocations.length,
+        unappliedAdvanceCredit: paymentAmount.minus(allocationTotal).toString(),
         manualRecord: true,
       });
       return created;
@@ -1931,9 +2471,10 @@ export class LandlordService {
     assertCanManage(role);
     const transactionResult = await this.prisma.$transaction(async (transaction) => {
       const deposit = await transaction.deposit.findFirst({
-        where: { id: depositId, tenancy: { unit: { property: { organisationId } } } },
+        where: { id: depositId, tenancy: { property: { organisationId } } },
       });
       if (!deposit) throw new NotFoundException('Deposit was not found in this organisation');
+      await assertWholeFrancsIfRwf(transaction, organisationId, [input.amount]);
       const value = amount(input.amount, 'Deposit transaction');
       let receivedAmount = deposit.receivedAmount;
       let heldBalance = deposit.heldBalance;
@@ -2008,6 +2549,7 @@ export class LandlordService {
         select: { id: true },
       });
       if (!property) throw new NotFoundException('Property was not found in this organisation');
+      await assertWholeFrancsIfRwf(transaction, organisationId, [input.amount]);
       if (input.evidenceFileId) {
         const file = await transaction.storedFile.findFirst({
           where: {
@@ -2157,6 +2699,10 @@ export class LandlordService {
           select: { id: true },
         });
         if (!property) throw new NotFoundException('Property was not found in this organisation');
+        await assertWholeFrancsIfRwf(transaction, organisationId, [
+          input.totalAmount,
+          ...input.allocations.map((allocation) => allocation.amount),
+        ]);
         if (input.evidenceFileId) {
           const file = await transaction.storedFile.findFirst({
             where: {
@@ -2306,6 +2852,10 @@ export class LandlordService {
         where: { id: requestId, unit: { property: { organisationId } } },
       });
       if (!existing) throw new NotFoundException('Maintenance request was not found in this organisation');
+      await assertWholeFrancsIfRwf(transaction, organisationId, [
+        input.estimatedCost,
+        input.actualCost,
+      ]);
       const allowed: Record<MaintenanceStatus, MaintenanceStatus[]> = {
         SUBMITTED: [MaintenanceStatus.SUBMITTED, MaintenanceStatus.APPROVED, MaintenanceStatus.ASSIGNED, MaintenanceStatus.REJECTED],
         APPROVED: [MaintenanceStatus.APPROVED, MaintenanceStatus.ASSIGNED, MaintenanceStatus.IN_PROGRESS, MaintenanceStatus.REJECTED],
