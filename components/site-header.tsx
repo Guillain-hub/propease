@@ -7,14 +7,14 @@ import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 
 const productLinks = [
-  { href: "/features", label: "Features" },
+  { href: "/#features", label: "Features" },
   { href: "/pricing", label: "Pricing" },
-  { href: "/landlords", label: "For Landlords" },
-  { href: "/property-managers", label: "For Managers" },
+  { href: "/#landlords", label: "For Landlords" },
+  { href: "/#managers", label: "For Managers" },
 ];
 
 const companyLinks = [
-  { href: "/about", label: "About Us" },
+  { href: "/#about", label: "About Us" },
   { href: "/contact", label: "Contact" },
 ];
 

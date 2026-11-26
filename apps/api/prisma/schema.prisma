@@ -299,6 +299,7 @@ model User {
   sentOrganisationInvitations OrganisationInvitation[] @relation("OrganisationInvitationSender")
   createdTenantLeaseOnboardings TenantLeaseOnboarding[] @relation("TenantLeaseOnboardingManager")
   createdLeaseAgreementSnapshots LeaseAgreementSnapshot[] @relation("LeaseAgreementSnapshotCreator")
+  requestedLeaseTerminations LeaseTerminationRequest[] @relation("LeaseTerminationRequester")
 
   @@map("users")
 }
@@ -566,6 +567,7 @@ model Lease {
   documents         LeaseDocument[]
   tenantLeaseOnboarding TenantLeaseOnboarding?
   agreementSnapshots LeaseAgreementSnapshot[]
+  terminationRequests LeaseTerminationRequest[]
 
   @@index([tenancyId, status])
   @@index([endDate, status])
@@ -607,6 +609,25 @@ model LeaseAgreementSnapshot {
   @@unique([onboardingId, version])
   @@index([leaseId, version])
   @@map("lease_agreement_snapshots")
+}
+
+model LeaseTerminationRequest {
+  id                 String    @id @default(uuid()) @db.Uuid
+  leaseId            String    @map("lease_id") @db.Uuid
+  requestedByUserId  String    @map("requested_by_user_id") @db.Uuid
+  tokenHash          String    @unique @map("token_hash") @db.Char(64)
+  terminationDate    DateTime  @map("termination_date") @db.Date
+  reason             String    @db.VarChar(500)
+  expiresAt          DateTime  @map("expires_at") @db.Timestamptz(6)
+  respondedAt        DateTime? @map("responded_at") @db.Timestamptz(6)
+  accepted           Boolean?
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  lease              Lease     @relation(fields: [leaseId], references: [id], onDelete: Cascade)
+  requestedBy        User      @relation("LeaseTerminationRequester", fields: [requestedByUserId], references: [id], onDelete: Restrict)
+
+  @@index([leaseId, createdAt])
+  @@index([expiresAt])
+  @@map("lease_termination_requests")
 }
 
 model LeaseDocument {

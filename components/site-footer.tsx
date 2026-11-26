@@ -9,7 +9,7 @@ const footerGroups = [
   {
     title: "Product",
     links: [
-      ["Features", "/features"],
+      ["Features", "/#features"],
       ["Pricing", "/pricing"],
       ["Create an account", "/register"],
       ["Log in", "/login"],
@@ -18,9 +18,9 @@ const footerGroups = [
   {
     title: "Who it's for",
     links: [
-      ["For landlords", "/landlords"],
-      ["For property managers", "/property-managers"],
-      ["About PropEase", "/about"],
+      ["For landlords", "/#landlords"],
+      ["For property managers", "/#managers"],
+      ["About PropEase", "/#about"],
       ["Contact", "/contact"],
     ],
   },

@@ -7,6 +7,7 @@ import {
   Building2,
   CalendarDays,
   Check,
+  ChevronDown,
   ChevronRight,
   CircleDollarSign,
   ClipboardCheck,
@@ -27,16 +28,19 @@ export function PageIntro({
   title,
   description,
   centered = true,
+  titleLevel = "h1",
 }: {
   eyebrow: string;
   title: string;
   description: string;
   centered?: boolean;
+  titleLevel?: "h1" | "h2";
 }) {
+  const Title = titleLevel;
   return (
     <div className={`page-intro${centered ? " page-intro-centered" : ""}`}>
       <SectionEyebrow>{eyebrow}</SectionEyebrow>
-      <h1>{title}</h1>
+      <Title>{title}</Title>
       <p>{description}</p>
     </div>
   );
@@ -158,21 +162,28 @@ export function PrimaryCta({
 
 export function HomeHero() {
   return (
-    <section className="hero-section">
+    <section className="hero-section" aria-labelledby="home-hero-title">
       <div className="hero-background">
         <div className="hero-background-overlay" />
       </div>
       <div className="container hero-container">
         <div className="hero-copy">
-          <h1>Manage properties with <span>Ease.</span></h1>
+          <span className="eyebrow hero-eyebrow"><span className="eyebrow-dot" />BUILT FOR BETTER PROPERTY MANAGEMENT</span>
+          <h1 id="home-hero-title">Manage properties with <span>Ease.</span></h1>
           <p>PropEase helps landlords and property managers organise properties, manage tenants and leases, track rent, document inspections and handle maintenance all in one place.</p>
           <div className="hero-actions">
             <Link className="button button-primary button-large" href="/register">Get started <ArrowUpRight size={17} /></Link>
-            <Link className="button button-outline button-large" href="/features">Explore features <ArrowRight size={16} /></Link>
+            <Link className="button button-outline button-large" href="/#features">Explore features <ArrowRight size={16} /></Link>
           </div>
-      
+          <ul className="hero-highlights" aria-label="Manage your property operations">
+            <li><Building2 size={15} /> Properties & tenants</li>
+            <li><FileText size={15} /> Leases & rent records</li>
+            <li><Wrench size={15} /> Maintenance</li>
+          </ul>
         </div>
-        
+        <Link href="/#about" className="hero-scroll" aria-label="Discover more about PropEase">
+          <span>DISCOVER PROPEASE</span><ChevronDown size={14} />
+        </Link>
       </div>
     </section>
   );

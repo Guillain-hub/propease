@@ -58,7 +58,12 @@ import {
   ResendTenantLeaseOnboardingInput,
   TenantLeaseReviewInput,
 } from './dto/tenant-lease-onboarding.dto.js';
+import {
+  CreateLeaseTerminationRequestInput,
+  LeaseTerminationResponseInput,
+} from './dto/lease-termination.dto.js';
 import { LandlordService } from './landlord.service.js';
+import { LeaseTerminationService } from './lease-termination.service.js';
 import { TenantLeaseOnboardingService } from './tenant-lease-onboarding.service.js';
 import { LandlordPermissionsGuard } from './landlord-permissions.guard.js';
 import { LandlordSubscriptionGuard } from './landlord-subscription.guard.js';
@@ -79,6 +84,7 @@ export class LandlordController {
   constructor(
     private readonly landlord: LandlordService,
     private readonly leaseOnboarding: TenantLeaseOnboardingService,
+    private readonly leaseTermination: LeaseTerminationService,
     private readonly pdf: PdfService,
   ) {}
 
@@ -350,6 +356,23 @@ export class LandlordController {
     return this.landlord.createLease(organisationId, user.sub, actorRole(request), input);
   }
 
+  @Post('leases/:leaseId/termination-requests')
+  requestLeaseTermination(
+    @Param('organisationId', ParseUUIDPipe) organisationId: string,
+    @Param('leaseId', ParseUUIDPipe) leaseId: string,
+    @CurrentUser() user: AccessTokenClaims,
+    @Req() request: Request,
+    @Body() input: CreateLeaseTerminationRequestInput,
+  ) {
+    return this.leaseTermination.request(
+      organisationId,
+      user.sub,
+      actorRole(request),
+      leaseId,
+      input,
+    );
+  }
+
   @Post('tenant-lease-onboardings')
   createTenantLeaseOnboarding(
     @Param('organisationId', ParseUUIDPipe) organisationId: string,
@@ -363,6 +386,26 @@ export class LandlordController {
       actorRole(request),
       input,
     );
+  }
+
+  @Post('tenant-lease-onboardings/preview')
+  @Header('Cache-Control', 'no-store')
+  async previewTenantLeaseAgreement(
+    @Param('organisationId', ParseUUIDPipe) organisationId: string,
+    @CurrentUser() user: AccessTokenClaims,
+    @Req() request: Request,
+    @Body() input: CreateTenantLeaseOnboardingInput,
+  ): Promise<StreamableFile> {
+    const pdf = await this.leaseOnboarding.preview(
+      organisationId,
+      user.sub,
+      actorRole(request),
+      input,
+    );
+    return new StreamableFile(pdf, {
+      type: 'application/pdf',
+      disposition: 'inline; filename="lease-agreement-preview.pdf"',
+    });
   }
 
   @Post('leases/:leaseId/tenant-lease-onboardings/resend')
@@ -380,6 +423,46 @@ export class LandlordController {
       leaseId,
       input,
     );
+  }
+
+  @Get('leases/:leaseId/signed-agreement')
+  @Header('Cache-Control', 'no-store')
+  async signedLeaseAgreement(
+    @Param('organisationId', ParseUUIDPipe) organisationId: string,
+    @Param('leaseId', ParseUUIDPipe) leaseId: string,
+    @CurrentUser() user: AccessTokenClaims,
+    @Req() request: Request,
+  ): Promise<StreamableFile> {
+    const pdf = await this.leaseOnboarding.getManagerSignedDocument(
+      organisationId,
+      user.sub,
+      actorRole(request),
+      leaseId,
+    );
+    return new StreamableFile(pdf, {
+      type: 'application/pdf',
+      disposition: 'attachment; filename="signed-lease-agreement.pdf"',
+    });
+  }
+
+  @Get('leases/:leaseId/agreement')
+  @Header('Cache-Control', 'no-store')
+  async leaseAgreement(
+    @Param('organisationId', ParseUUIDPipe) organisationId: string,
+    @Param('leaseId', ParseUUIDPipe) leaseId: string,
+    @CurrentUser() user: AccessTokenClaims,
+    @Req() request: Request,
+  ): Promise<StreamableFile> {
+    const pdf = await this.leaseOnboarding.getManagerAgreementDocument(
+      organisationId,
+      user.sub,
+      actorRole(request),
+      leaseId,
+    );
+    return new StreamableFile(pdf, {
+      type: 'application/pdf',
+      disposition: 'inline; filename="lease-agreement.pdf"',
+    });
   }
 
   @Patch('leases/:leaseId/status')
@@ -912,6 +995,26 @@ export class TenantLeaseReviewController {
       type: 'application/pdf',
       disposition: 'inline; filename="lease-agreement.pdf"',
     });
+  }
+}
+
+@Controller('lease-termination-reviews/:token')
+export class TenantLeaseTerminationReviewController {
+  constructor(private readonly leaseTermination: LeaseTerminationService) {}
+
+  @Get()
+  @Header('Cache-Control', 'no-store')
+  getRequest(@Param('token') token: string) {
+    return this.leaseTermination.getPublicRequest(token);
+  }
+
+  @Post('response')
+  @Header('Cache-Control', 'no-store')
+  respond(
+    @Param('token') token: string,
+    @Body() input: LeaseTerminationResponseInput,
+  ) {
+    return this.leaseTermination.respond(token, input);
   }
 }
 

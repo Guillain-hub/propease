@@ -10,6 +10,8 @@ type LeaseReview = {
   status: string;
   response: TenantResponse | null;
   responseAt: string | null;
+  tenantSignatureName?: string | null;
+  tenantSignedAt?: string | null;
   expiresAt: string;
   agreementVersion: number;
   agreement: JsonRecord;
@@ -51,6 +53,8 @@ export function TenantLeaseReviewClient({ token }: { token: string }) {
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
   const [requestingChanges, setRequestingChanges] = useState(false);
+  const [signatureName, setSignatureName] = useState("");
+  const [signatureConsent, setSignatureConsent] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -105,6 +109,9 @@ export function TenantLeaseReviewClient({ token }: { token: string }) {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             response: responseAction,
+            ...(responseAction === "ACCEPTED"
+              ? { signatureName: signatureName.trim(), signatureConsent }
+              : {}),
             ...(responseAction === "CHANGES_REQUESTED" ? { message: message.trim() } : {}),
           }),
           cache: "no-store",
@@ -121,9 +128,18 @@ export function TenantLeaseReviewClient({ token }: { token: string }) {
         status: string;
         response: TenantResponse;
         responseAt: string;
+        tenantSignatureName?: string | null;
+        tenantSignedAt?: string | null;
       };
       setReview((current) => current
-        ? { ...current, status: result.status, response: result.response, responseAt: result.responseAt }
+        ? {
+            ...current,
+            status: result.status,
+            response: result.response,
+            responseAt: result.responseAt,
+            tenantSignatureName: result.tenantSignatureName,
+            tenantSignedAt: result.tenantSignedAt,
+          }
         : current);
       setRequestingChanges(false);
     } catch (requestError) {
@@ -212,6 +228,9 @@ export function TenantLeaseReviewClient({ token }: { token: string }) {
               <FileText size={17} />
               View lease document
             </a>
+            <div className="tenant-review-document-preview">
+              <iframe title="Full lease agreement" src={documentUrl} />
+            </div>
 
             {review.expiresAt && (
               <p className="tenant-review-expiry">This secure review link expires {formatDate(review.expiresAt)}.</p>
@@ -219,10 +238,34 @@ export function TenantLeaseReviewClient({ token }: { token: string }) {
 
             {reviewable && !requestingChanges && (
               <div className="tenant-review-actions">
-                <button type="button" className="tenant-review-accept" disabled={submitting} onClick={() => respond("ACCEPTED")}>
-                  {submitting ? <LoaderCircle className="tenant-review-spinner" size={16} /> : null}
-                  Accept lease
-                </button>
+                <form className="tenant-review-signature-form" onSubmit={(event) => respond("ACCEPTED", event)}>
+                  <label htmlFor="tenant-lease-signature-name">Type your full legal name to sign</label>
+                  <input
+                    id="tenant-lease-signature-name"
+                    required
+                    maxLength={180}
+                    autoComplete="name"
+                    value={signatureName}
+                    onChange={(event) => setSignatureName(event.target.value)}
+                  />
+                  <label className="tenant-review-signature-consent">
+                    <input
+                      type="checkbox"
+                      required
+                      checked={signatureConsent}
+                      onChange={(event) => setSignatureConsent(event.target.checked)}
+                    />
+                    <span>I intend my typed name to be my electronic signature and agree to this lease.</span>
+                  </label>
+                  <button
+                    type="submit"
+                    className="tenant-review-accept"
+                    disabled={submitting || signatureName.trim().toLocaleLowerCase() !== text(tenant.legalName, "").trim().toLocaleLowerCase() || !signatureConsent}
+                  >
+                    {submitting ? <LoaderCircle className="tenant-review-spinner" size={16} /> : null}
+                    Sign and accept lease
+                  </button>
+                </form>
                 <button type="button" className="tenant-review-secondary" disabled={submitting} onClick={() => setRequestingChanges(true)}>
                   Request changes
                 </button>
@@ -264,8 +307,10 @@ export function TenantLeaseReviewClient({ token }: { token: string }) {
             {error && <p className="tenant-review-inline-error" role="alert">{error}</p>}
             <p className="tenant-review-footnote">
               {review.response
-                ? "Your property manager has been notified of your response."
-                : "Accepting confirms your agreement to these terms. No rent or deposit payment is made through this page."}
+                ? review.response === "ACCEPTED"
+                  ? `Your electronic signature${review.tenantSignatureName ? ` from ${review.tenantSignatureName}` : ""} has been recorded. Your property manager has been notified.`
+                  : "Your property manager has been notified of your response."
+                : "Signing records your electronic acceptance of this agreement. No rent or deposit payment is made through this page."}
             </p>
           </>
         ) : null}

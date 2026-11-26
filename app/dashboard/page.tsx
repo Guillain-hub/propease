@@ -713,6 +713,7 @@ export default function DashboardPage() {
             <LandlordSectionWorkspace
               section={activeSection}
               organisationId={data.organisation?.id ?? ""}
+              organisationType={data.organisation?.type ?? "LANDLORD"}
               currency={data.organisation?.currency ?? "RWF"}
               role={data.role}
               userId={data.user.id}

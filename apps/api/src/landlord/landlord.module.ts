@@ -5,10 +5,12 @@ import { OrganisationsModule } from '../organisations/organisations.module.js';
 import { DocumentsModule } from '../documents/documents.module.js';
 import {
   LandlordController,
+  TenantLeaseTerminationReviewController,
   TenantLeaseReviewController,
   TeamInvitationController,
 } from './landlord.controller.js';
 import { LandlordService } from './landlord.service.js';
+import { LeaseTerminationService } from './lease-termination.service.js';
 import { TenantLeaseOnboardingService } from './tenant-lease-onboarding.service.js';
 import { LandlordPermissionsGuard } from './landlord-permissions.guard.js';
 import { LandlordSubscriptionModule } from './landlord-subscription.module.js';
@@ -24,10 +26,12 @@ import { LandlordSubscriptionModule } from './landlord-subscription.module.js';
   controllers: [
     LandlordController,
     TenantLeaseReviewController,
+    TenantLeaseTerminationReviewController,
     TeamInvitationController,
   ],
   providers: [
     LandlordService,
+    LeaseTerminationService,
     TenantLeaseOnboardingService,
     LandlordPermissionsGuard,
   ],

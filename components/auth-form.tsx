@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
+import { Eye, EyeOff } from "lucide-react";
 
 type AuthFormProps = { mode: "login" | "register" };
 type Feedback = { kind: "success" | "error"; message: string };
@@ -16,6 +17,7 @@ export function AuthForm({ mode }: AuthFormProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [feedback, setFeedback] = useState<Feedback | null>(null);
   const [invitationToken, setInvitationToken] = useState<string | null>(null);
+  const [showPassword, setShowPassword] = useState(false);
   const formRef = useRef<HTMLFormElement>(null);
   const isRegister = mode === "register";
 
@@ -79,15 +81,23 @@ export function AuthForm({ mode }: AuthFormProps) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const result = (await response.json()) as ApiError & {
-        authorizationUrl?: string;
-      };
-      if (!response.ok || !result.authorizationUrl) {
-        const apiMessage = Array.isArray(result.message)
+      let result: (ApiError & { authorizationUrl?: string }) | undefined;
+      try {
+        result = (await response.json()) as ApiError & {
+          authorizationUrl?: string;
+        };
+      } catch {
+        result = undefined;
+      }
+      if (!response.ok || !result?.authorizationUrl) {
+        const apiMessage = Array.isArray(result?.message)
           ? result.message.join(". ")
-          : result.message;
+          : result?.message;
         throw new Error(
-          apiMessage || "Google sign-in is currently unavailable.",
+          apiMessage ||
+            (response.status >= 500
+              ? "Google sign-in is temporarily unavailable. Please try again."
+              : "Google sign-in is currently unavailable."),
         );
       }
       window.location.assign(result.authorizationUrl);
@@ -267,16 +277,40 @@ export function AuthForm({ mode }: AuthFormProps) {
       </div>
       <div className="form-field">
         <label htmlFor="auth-password">Password <span className="required-field-marker" aria-hidden="true">*</span></label>
-        <input
-          id="auth-password"
-          name="password"
-          type="password"
-          autoComplete={isRegister ? "new-password" : "current-password"}
-          minLength={12}
-          maxLength={128}
-          placeholder="At least 12 characters"
-          required
-        />
+        {isRegister ? (
+          <input
+            id="auth-password"
+            name="password"
+            type="password"
+            autoComplete="new-password"
+            minLength={12}
+            maxLength={128}
+            placeholder="At least 12 characters"
+            required
+          />
+        ) : (
+          <span className="auth-password-input">
+            <input
+              id="auth-password"
+              name="password"
+              type={showPassword ? "text" : "password"}
+              autoComplete="current-password"
+              minLength={12}
+              maxLength={128}
+              placeholder="Your password"
+              required
+            />
+            <button
+              className="auth-password-toggle"
+              type="button"
+              aria-label={showPassword ? "Hide password" : "Show password"}
+              aria-pressed={showPassword}
+              onClick={() => setShowPassword((visible) => !visible)}
+            >
+              {showPassword ? <EyeOff size={17} aria-hidden="true" /> : <Eye size={17} aria-hidden="true" />}
+            </button>
+          </span>
+        )}
       </div>
       {isRegister && (
         <div className="form-field">

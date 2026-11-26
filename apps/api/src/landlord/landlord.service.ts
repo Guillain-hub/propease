@@ -1679,8 +1679,19 @@ export class LandlordService {
           tenancy: {
             select: {
               id: true,
-              tenant: { select: { id: true, legalName: true } },
+              tenant: {
+                select: {
+                  id: true,
+                  legalName: true,
+                  email: true,
+                  phone: true,
+                  emergencyContactName: true,
+                  emergencyContactPhone: true,
+                },
+              },
               property: { select: { id: true, name: true } },
+              moveInDate: true,
+              moveOutDate: true,
               unit: { select: { id: true, unitNumber: true } },
             },
           },
@@ -1696,6 +1707,19 @@ export class LandlordService {
                 select: { id: true, version: true, agreement: true, createdAt: true },
                 orderBy: { version: 'desc' },
               },
+            },
+            terminationRequests: {
+              select: {
+                id: true,
+                terminationDate: true,
+                reason: true,
+                expiresAt: true,
+                respondedAt: true,
+                accepted: true,
+                createdAt: true,
+              },
+              orderBy: { createdAt: 'desc' },
+              take: 1,
             },
           },
         },
@@ -1774,6 +1798,11 @@ export class LandlordService {
     input: LeaseStatusInput,
   ) {
     assertCanManage(role);
+    if (input.status === LeaseStatus.TERMINATED) {
+      throw new ConflictException(
+        'Leases must be terminated through the tenant confirmation workflow',
+      );
+    }
     const lease = await this.prisma.$transaction(async (transaction) => {
       const existing = await transaction.lease.findFirst({
         where: { id: leaseId, tenancy: { property: { organisationId } } },

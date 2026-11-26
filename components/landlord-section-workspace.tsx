@@ -17,6 +17,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Droplets,
+  Eye,
   FileText,
   Home,
   Landmark,
@@ -43,6 +44,12 @@ import {
   Zap,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
+import {
+  defaultLeaseAgreementValues,
+  LeaseAgreementFields,
+  leaseAgreementValuesFromSnapshot,
+  serializeLeaseAgreementValues,
+} from "./lease-agreement-fields";
 
 type SectionName =
   | "Properties"
@@ -89,6 +96,20 @@ type PortfolioRow = {
   attentionItems: PropertyAttentionItem[];
 };
 type PropertyQuickFilter = "all" | "outstanding" | "vacant" | "expiring";
+type ClientPortfolioSummary = {
+  owner: ValueRecord;
+  properties: PortfolioRow[];
+  units: number;
+  occupied: number;
+  outstanding: bigint;
+  paymentStatus:
+    | "UP_TO_DATE"
+    | "PAYMENT_DUE"
+    | "OVERDUE"
+    | "NOT_CHARGED"
+    | "NO_ACTIVE_TENANTS"
+    | "NO_PROPERTIES";
+};
 type PropertyActionTab = "overview" | "ledger" | "repairs" | "notifications";
 type PropertyAttentionItem = {
   id: string;
@@ -478,6 +499,7 @@ function uploadFileField(label: string): Field {
 export function LandlordSectionWorkspace({
   section,
   organisationId,
+  organisationType,
   currency,
   role,
   userId,
@@ -491,6 +513,7 @@ export function LandlordSectionWorkspace({
 }: {
   section: SectionName;
   organisationId: string;
+  organisationType: "LANDLORD" | "PROPERTY_MANAGEMENT_COMPANY";
   currency: string;
   role: string;
   userId: string;
@@ -516,7 +539,8 @@ export function LandlordSectionWorkspace({
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [rentMode, setRentMode] = useState<"charges" | "payments" | "deposits">("charges");
   const [tenantMode, setTenantMode] = useState<"tenants" | "tenancies">("tenants");
-  const [propertyView, setPropertyView] = useState<"properties" | "owners">("properties");
+  const [propertyView, setPropertyView] = useState<"properties" | "owners" | "client-properties">("properties");
+  const [selectedClientId, setSelectedClientId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -537,6 +561,8 @@ export function LandlordSectionWorkspace({
   const [attentionReadError, setAttentionReadError] = useState<string | null>(null);
   const [tenantLeaseOnboardingOpen, setTenantLeaseOnboardingOpen] = useState(false);
   const [tenantLeaseOnboardingUnitId, setTenantLeaseOnboardingUnitId] = useState<string | null>(null);
+  const [tenantLeaseAssignmentTenant, setTenantLeaseAssignmentTenant] = useState<ValueRecord | null>(null);
+  const [leaseCreationOpen, setLeaseCreationOpen] = useState(false);
   const [leaseResendSelection, setLeaseResendSelection] = useState<ValueRecord | null>(null);
   const [createdTenants, setCreatedTenants] = useState<ValueRecord[]>([]);
   const [propertySearch, setPropertySearch] = useState(initialPropertySearch ?? "");
@@ -559,6 +585,9 @@ export function LandlordSectionWorkspace({
   const textRequestResolver = useRef<((value: string | null) => void) | null>(null);
 
   const base = `/organisations/${organisationId}/landlord`;
+  const canManagePropertyOwners =
+    organisationType === "PROPERTY_MANAGEMENT_COMPANY" &&
+    ["OWNER", "ADMIN"].includes(role);
   const attentionReadStorageKey = `propease:read-property-notifications:${organisationId}:${userId}`;
   const attentionReadIds = useMemo(
     () => attentionReadState.key === attentionReadStorageKey
@@ -631,10 +660,10 @@ export function LandlordSectionWorkspace({
           ["maintenance", "requests", "requests"],
           ["notices", "notices", "notices"],
           ["", "portfolio"],
-          ...(role === "OWNER" || role === "ADMIN"
+          ...(canManagePropertyOwners
             ? [["property-owners", "propertyOwners", "owners"] as [string, string, string]]
             : []),
-          ...(role === "OWNER" || role === "ADMIN"
+          ...(canManagePropertyOwners
             ? [["team", "members", "members"] as [string, string, string]]
             : []),
           ],
@@ -651,7 +680,7 @@ export function LandlordSectionWorkspace({
         Notices: [["notices", "notices", "notices"], ["tenancies", "tenancies", "tenancies"]],
         Reports: [
           ["reports/financial", "report"],
-          ...(role === "OWNER" || role === "ADMIN"
+          ...(canManagePropertyOwners
             ? [["property-owners", "propertyOwners", "owners"] as [string, string, string]]
             : []),
         ],
@@ -776,7 +805,11 @@ export function LandlordSectionWorkspace({
     const expenseRows = rowsFor(data, "expenses");
 
     return properties
-      .filter((property) => !portfolioPropertyId || stringValue(property.id, "") === portfolioPropertyId)
+      .filter((property) =>
+        propertyView !== "properties" ||
+        !portfolioPropertyId ||
+        stringValue(property.id, "") === portfolioPropertyId,
+      )
       .map((property) => {
       const propertyId = stringValue(property.id, "");
       const propertyUnits = units.filter(
@@ -1229,7 +1262,43 @@ export function LandlordSectionWorkspace({
         attentionItems: unreadAttentionItems,
       };
       });
-  }, [properties, units, tenancies, charges, data, expensePeriod, portfolioPropertyId, attentionReadIds]);
+  }, [properties, units, tenancies, charges, data, expensePeriod, portfolioPropertyId, attentionReadIds, propertyView]);
+  const clientSummaries = useMemo<ClientPortfolioSummary[]>(() => {
+    return rowsFor(data, "propertyOwners").map((owner) => {
+      const ownerId = stringValue(owner.id, "");
+      const ownerProperties = portfolioRows.filter(
+        (row) =>
+          stringValue(
+            nested(row.property, "propertyOwner", "id") ?? row.property.propertyOwnerId,
+            "",
+          ) === ownerId,
+      );
+      const units = ownerProperties.reduce((sum, row) => sum + row.units, 0);
+      const occupied = ownerProperties.reduce((sum, row) => sum + row.occupied, 0);
+      const outstanding = ownerProperties.reduce(
+        (sum, row) => sum + row.outstanding,
+        BigInt(0),
+      );
+      const paymentStatus: ClientPortfolioSummary["paymentStatus"] =
+        ownerProperties.length === 0
+          ? "NO_PROPERTIES"
+          : ownerProperties.some(
+                (row) => row.rentStatus === "OVERDUE" && row.outstanding > BigInt(0),
+              )
+            ? "OVERDUE"
+            : outstanding > BigInt(0)
+              ? "PAYMENT_DUE"
+              : ownerProperties.some((row) => row.rentStatus === "NOT_CHARGED")
+                ? "NOT_CHARGED"
+                : occupied === 0
+                  ? "NO_ACTIVE_TENANTS"
+                  : "UP_TO_DATE";
+      return { owner, properties: ownerProperties, units, occupied, outstanding, paymentStatus };
+    });
+  }, [data, portfolioRows]);
+  const selectedClient = clientSummaries.find(
+    (summary) => stringValue(summary.owner.id, "") === selectedClientId,
+  ) ?? null;
   const filteredPropertyRows = useMemo(() => {
     const query = propertySearch.trim().toLowerCase();
     return portfolioRows.filter((row) => {
@@ -1391,7 +1460,7 @@ export function LandlordSectionWorkspace({
       case "Properties":
         if (propertyView === "owners") {
           return [
-            { name: "name", label: "Owner name", required: true },
+            { name: "name", label: organisationType === "PROPERTY_MANAGEMENT_COMPANY" ? "Client name" : "Owner name", required: true },
             { name: "email", label: "Email address", type: "email" },
             { name: "phone", label: "Phone number" },
           ];
@@ -1832,17 +1901,7 @@ export function LandlordSectionWorkspace({
   }
 
   function assignUnitToTenant(row: ValueRecord) {
-    if (typeof row.id !== "string") return;
-    setTenantMode("tenancies");
-    setEditingId(null);
-    setForm({
-      tenantId: row.id,
-      moveInDate: new Date().toISOString().slice(0, 10),
-    });
-    setSelectedFile(null);
-    setError(null);
-    setSuccess(null);
-    setFormOpen(true);
+    if (typeof row.id === "string") setTenantLeaseAssignmentTenant(row);
   }
 
   async function uploadFile(file: File): Promise<string> {
@@ -1932,7 +1991,7 @@ export function LandlordSectionWorkspace({
           if (propertyView === "owners") {
             path = "property-owners";
             payload = Object.fromEntries(Object.entries(form).filter(([, value]) => value !== ""));
-            label = "Property owner saved";
+            label = organisationType === "PROPERTY_MANAGEMENT_COMPANY" ? "Client saved" : "Property owner saved";
           } else {
             path = "properties";
             const { photoFileId: _photoFileId, ...propertyFields } = form;
@@ -2107,7 +2166,9 @@ export function LandlordSectionWorkspace({
             ? "units"
             : "tenants";
         path = `${collection}/${editingId}`;
-        label = `${section === "Properties" ? propertyView === "owners" ? "Property owner" : "Property" : section === "Units" ? "Unit" : "Tenant"} updated`;
+        label = `${section === "Properties" ? propertyView === "owners"
+          ? organisationType === "PROPERTY_MANAGEMENT_COMPANY" ? "Client" : "Property owner"
+          : "Property" : section === "Units" ? "Unit" : "Tenant"} updated`;
         }
       }
 
@@ -2292,17 +2353,6 @@ export function LandlordSectionWorkspace({
       if (!signedAt) return;
       body.signedAt = `${signedAt}T00:00:00.000Z`;
     }
-    if (status === "TERMINATED") {
-      const terminationReason = await requestText({
-        title: "Terminate lease",
-        description: "Provide a reason for terminating this lease.",
-        label: "Termination reason",
-        required: true,
-        multiline: true,
-      });
-      if (!terminationReason?.trim()) return;
-      body.terminationReason = terminationReason;
-    }
     setError(null);
     try {
       await apiRequest(`${base}/leases/${row.id}/status`, {
@@ -2314,6 +2364,30 @@ export function LandlordSectionWorkspace({
       onUpdated();
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "The lease status could not be updated.");
+    }
+  }
+
+  async function requestLeaseTermination(row: ValueRecord) {
+    if (typeof row.id !== "string") return;
+    const reason = await requestText({
+      title: "Request lease termination",
+      description: "The tenant must confirm this request using the secure link emailed to them. The lease remains active until they agree.",
+      label: "Reason for termination",
+      required: true,
+      multiline: true,
+    });
+    if (!reason?.trim()) return;
+    setError(null);
+    try {
+      await apiRequest(`${base}/leases/${row.id}/termination-requests`, {
+        method: "POST",
+        body: JSON.stringify({ reason }),
+      });
+      setSuccess("Termination request sent to the tenant for confirmation.");
+      setRefreshKey((key) => key + 1);
+      onUpdated();
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "The termination request could not be sent.");
     }
   }
 
@@ -2424,6 +2498,30 @@ export function LandlordSectionWorkspace({
     }
   }
 
+  async function downloadSignedAgreement(leaseId: string) {
+    try {
+      const request = () => fetch(
+        `${apiBaseUrl}/organisations/${organisationId}/landlord/leases/${leaseId}/signed-agreement`,
+        { credentials: "include" },
+      );
+      let response = await request();
+      if (response.status === 401 && await refreshSession()) response = await request();
+      if (!response.ok) {
+        const body = await response.json().catch(() => undefined) as ApiError | undefined;
+        const message = Array.isArray(body?.message) ? body.message.join(". ") : body?.message;
+        throw new Error(message || `Download failed (${response.status})`);
+      }
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "signed-lease-agreement.pdf";
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "The signed agreement could not be downloaded.");
+    }
+  }
+
   const canManageRecords = ["OWNER", "ADMIN", "MANAGER"].includes(role);
   const canManageFinancialRecords = [
     "OWNER",
@@ -2431,7 +2529,6 @@ export function LandlordSectionWorkspace({
     "MANAGER",
     "ACCOUNTANT",
   ].includes(role);
-  const canManagePropertyOwners = ["OWNER", "ADMIN"].includes(role);
   const canCreateProperties = ["OWNER", "ADMIN"].includes(role);
   const canManageCurrentRecords =
     section === "Team"
@@ -2444,16 +2541,23 @@ export function LandlordSectionWorkspace({
   const canCreateCurrentRecord =
     canManageCurrentRecords &&
     (section !== "Properties" ||
-      propertyView !== "properties" ||
-      canCreateProperties);
+      (propertyView === "properties"
+        ? canCreateProperties
+        : propertyView === "owners" && canManagePropertyOwners));
   const canUpdateMaintenance =
     canManageRecords || role === "MAINTENANCE_STAFF";
   const sectionItemName = section === "Properties" && propertyView === "owners"
-    ? "property owner"
+    ? organisationType === "PROPERTY_MANAGEMENT_COMPANY" ? "client" : "property owner"
     : section.toLowerCase().replace(/ies$/, "y").replace(/s$/, "");
-  const title = section === "Rent & Deposits" ? "Rent & deposits" : section;
+  const title = section === "Properties" && propertyView === "owners"
+    ? organisationType === "PROPERTY_MANAGEMENT_COMPANY" ? "Clients" : "Property owners"
+    : section === "Properties" && propertyView === "client-properties"
+      ? selectedClient ? `${stringValue(selectedClient.owner.name)} · Properties` : "Client properties"
+      : section === "Rent & Deposits" ? "Rent & deposits" : section;
   const formActionLabel = section === "Properties"
-    ? propertyView === "owners" ? "Add property owner" : "Add property"
+    ? propertyView === "owners"
+      ? organisationType === "PROPERTY_MANAGEMENT_COMPANY" ? "Add client" : "Add property owner"
+      : "Add property"
     : section === "Units"
       ? "Add unit"
       : section === "Tenants"
@@ -2605,7 +2709,7 @@ export function LandlordSectionWorkspace({
     : [];
   return (
     <div className={`landlord-section${section === "Properties" ? " is-properties-section" : ""}`}>
-      {(section !== "Properties" || propertyView === "owners") && (
+      {(section !== "Properties" || propertyView !== "properties") && (
       <div className="dashboard-heading-row">
         <div>
           <span className="dashboard-date">
@@ -2614,21 +2718,36 @@ export function LandlordSectionWorkspace({
           <h1>{title}</h1>
           {section === "Properties" && (
             <p>
-              {role === "MAINTENANCE_STAFF"
+              {propertyView === "client-properties"
+                ? "Review this client’s property occupancy, rent collection and outstanding balances."
+                : propertyView === "owners"
+                  ? "Manage clients and review the performance of their managed properties."
+                  : role === "MAINTENANCE_STAFF"
                 ? "Review and update your assigned property maintenance requests."
                 : "Manage your properties, units, tenants and financial performance."}
             </p>
           )}
         </div>
         <div className="properties-heading-actions">
-          {section === "Properties" && canCreateCurrentRecord && (
+          {section === "Properties" && propertyView === "client-properties" && (
+            <button
+              className="dashboard-secondary-button"
+              type="button"
+              onClick={() => setPropertyView("owners")}
+            >
+              <ChevronLeft size={15} /> Back to clients
+            </button>
+          )}
+          {section === "Properties" && propertyView !== "client-properties" && canCreateCurrentRecord && (
             <button
               className="dashboard-primary-button landlord-add-record-button"
               ref={addButtonRef}
               type="button"
               onClick={() => setPropertySetupOpen(true)}
             >
-              <Plus size={16} /> {propertyView === "owners" ? "Add property owner" : "Add Property"}
+              <Plus size={16} /> {propertyView === "owners"
+                ? organisationType === "PROPERTY_MANAGEMENT_COMPANY" ? "Add client" : "Add property owner"
+                : "Add Property"}
             </button>
           )}
           <button
@@ -2665,7 +2784,7 @@ export function LandlordSectionWorkspace({
         </div>
       )}
 
-      {section === "Properties" && canManagePropertyOwners && (
+      {section === "Properties" && canManagePropertyOwners && propertyView !== "client-properties" && (
         <div className="landlord-tabs" role="tablist" aria-label="Property records">
           {(["properties", "owners"] as const).map((view) => (
             <button
@@ -2681,7 +2800,7 @@ export function LandlordSectionWorkspace({
               role="tab"
               aria-selected={propertyView === view}
             >
-              {view === "properties" ? "Properties" : "Owners"}
+              {view === "properties" ? "Properties" : "Clients"}
             </button>
           ))}
         </div>
@@ -2744,13 +2863,34 @@ export function LandlordSectionWorkspace({
         ) : propertyView === "owners" ? (
           <section className="landlord-panel landlord-records-panel">
             <div className="landlord-panel-heading">
-              <div><h2>Property owners</h2></div>
+              <div><h2>Clients</h2></div>
             </div>
             <PropertyOwnerList
               rows={rowsFor(data, "propertyOwners")}
+              summaries={clientSummaries}
+              currency={currency}
+              onManage={(owner) => {
+                setSelectedClientId(stringValue(owner.id, ""));
+                setPropertyView("client-properties");
+              }}
               onEdit={canManagePropertyOwners ? editRecord : undefined}
             />
           </section>
+        ) : propertyView === "client-properties" ? (
+          selectedClient ? (
+            <ClientPropertiesOverview
+              summary={selectedClient}
+              currency={currency}
+              onManageProperty={(propertyId) => setPropertyAction({ type: "manage-property", propertyId })}
+            />
+          ) : (
+            <div className="landlord-empty-state">
+              <p>This client could not be found.</p>
+              <button type="button" className="dashboard-secondary-button" onClick={() => setPropertyView("owners")}>
+                <ChevronLeft size={15} /> Back to clients
+              </button>
+            </div>
+          )
         ) : (
           <div className="properties-dashboard properties-reference-dashboard">
             <section className="property-portfolio-overview" aria-labelledby="property-portfolio-overview-title">
@@ -2761,7 +2901,7 @@ export function LandlordSectionWorkspace({
                     {new Intl.DateTimeFormat("en", {
                       month: "long",
                       year: "numeric",
-                    }).format(new Date())} Billing Cycle · All amounts in Rwandan Francs ({currency})
+                    }).format(new Date())} Billing Cycle · All amounts in {currency}
                   </p>
                 </div>
                 <div className="property-portfolio-header-controls">
@@ -3154,7 +3294,12 @@ export function LandlordSectionWorkspace({
                                     ? formatAmount(primaryUnit.rentAmount, currency)
                                     : "—"}
                               </strong>
-                              <span className={`property-ledger-rent-status is-${propertyRentStatusType.toLowerCase().replaceAll("_", "-")}`}>
+                              <span
+                                className={`property-ledger-rent-status is-${propertyRentStatusType.toLowerCase().replaceAll("_", "-")}`}
+                                title={propertyRentStatusType === "NOT_CHARGED"
+                                  ? "No non-void rent charge has been created for the current period. This does not mean rent is paid."
+                                  : undefined}
+                              >
                                 {propertyRentStatusType === "NO_TENANTS" && <UserRound size={10} aria-hidden="true" />}
                                 {propertyRentStatusText}
                               </span>
@@ -3583,7 +3728,15 @@ export function LandlordSectionWorkspace({
                     className="dashboard-primary-button landlord-add-record-button"
                     ref={addButtonRef}
                     type="button"
-                    onClick={() => openForm()}
+                    onClick={() => {
+                      if (section === "Leases") {
+                        setLeaseCreationOpen(true);
+                      } else if (section === "Tenants" && tenantMode === "tenancies") {
+                        setTenantLeaseAssignmentTenant({});
+                      } else {
+                        openForm();
+                      }
+                    }}
                   >
                     <Plus size={16} /> {formActionLabel}
                   </button>
@@ -3674,6 +3827,7 @@ export function LandlordSectionWorkspace({
                 currency={currency}
                 section={section}
                 onDownload={(fileId) => void downloadFile(fileId)}
+                onSignedAgreement={canManageRecords ? (row) => void downloadSignedAgreement(stringValue(row.id, "")) : undefined}
                 onLeaseStatus={canManageRecords ? (row, status) => void updateLeaseStatus(row, status) : undefined}
                 onResendLease={canManageRecords ? setLeaseResendSelection : undefined}
               />
@@ -3905,6 +4059,43 @@ export function LandlordSectionWorkspace({
           }}
         />
       )}
+      {tenantLeaseAssignmentTenant && (
+        <TenantLeaseAssignmentDialog
+          organisationId={organisationId}
+          tenant={tenantLeaseAssignmentTenant}
+          properties={properties}
+          tenants={tenants}
+          units={units}
+          tenancies={tenancies}
+          currency={currency}
+          onClose={() => setTenantLeaseAssignmentTenant(null)}
+          onComplete={(emailSent) => {
+            setTenantLeaseAssignmentTenant(null);
+            setRefreshKey((key) => key + 1);
+            setSuccess(emailSent
+              ? "Lease offer created and review email sent."
+              : "Lease offer created, but the review email could not be delivered.");
+            onUpdated();
+          }}
+        />
+      )}
+      {leaseCreationOpen && (
+        <TenantLeaseExistingTenancyDialog
+          organisationId={organisationId}
+          tenancies={tenancies}
+          units={units}
+          currency={currency}
+          onClose={() => setLeaseCreationOpen(false)}
+          onComplete={(emailSent) => {
+            setLeaseCreationOpen(false);
+            setRefreshKey((key) => key + 1);
+            setSuccess(emailSent
+              ? "Lease offer created and review email sent."
+              : "Lease offer created, but the review email could not be delivered.");
+            onUpdated();
+          }}
+        />
+      )}
       {propertyAction?.type === "assign" && actionProperty && (
         <TenantLeaseOnboardingDialog
           organisationId={organisationId}
@@ -3981,6 +4172,7 @@ export function LandlordSectionWorkspace({
               unitId: propertyAction.unitId,
             });
           }}
+          onRequestTermination={(lease) => void requestLeaseTermination(lease)}
           canEdit={canManageCurrentRecords}
           onEditProperty={() => {
             setPropertyAction(null);
@@ -4110,6 +4302,7 @@ function PropertyActionDrawer({
   onClose,
   onRecordRent,
   onAssignTenant,
+  onRequestTermination,
   canEdit,
   onEditProperty,
   onAttentionOpen,
@@ -4131,6 +4324,7 @@ function PropertyActionDrawer({
   onClose: () => void;
   onRecordRent: () => void;
   onAssignTenant: () => void;
+  onRequestTermination: (lease: ValueRecord) => void;
   canEdit: boolean;
   onEditProperty: () => void;
   onAttentionOpen: (item: PropertyAttentionItem) => void;
@@ -4195,6 +4389,46 @@ function PropertyActionDrawer({
   const isHouse = stringValue(property.type, "").toUpperCase() === "HOUSE";
   const isCommercial = stringValue(property.type, "").toUpperCase() === "COMMERCIAL";
   const hasLease = Boolean(details?.activeTenancy || details?.upcomingTenancy);
+
+  async function viewLeaseAgreement(leaseId: string) {
+    const previewWindow = window.open("about:blank", "_blank");
+    if (!previewWindow) {
+      setError("Allow pop-ups to view the lease agreement PDF.");
+      return;
+    }
+
+    setError(null);
+    try {
+      const request = () =>
+        fetch(`${apiBaseUrl}${base}/leases/${leaseId}/agreement`, {
+          credentials: "include",
+        });
+      let response = await request();
+      if (response.status === 401 && await refreshSession()) {
+        response = await request();
+      }
+      if (!response.ok) {
+        const body = await response.json().catch(() => undefined) as ApiError | undefined;
+        const message = Array.isArray(body?.message)
+          ? body.message.join(". ")
+          : body?.message;
+        throw new Error(message || `The lease agreement could not be opened (${response.status}).`);
+      }
+
+      const objectUrl = URL.createObjectURL(await response.blob());
+      previewWindow.location.href = objectUrl;
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000);
+    } catch (requestError) {
+      previewWindow.close();
+      setError(
+        requestError instanceof TypeError
+          ? "Couldn't reach the PropEase API. Check the API connection and try again."
+          : requestError instanceof Error
+            ? requestError.message
+            : "The lease agreement could not be opened.",
+      );
+    }
+  }
 
   async function saveUnitDetails(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -5382,18 +5616,81 @@ function PropertyActionDrawer({
                       </header>
                       {unitLeases.length ? (
                         <div className="unit-lease-history-list">
-                          {unitLeases.map((lease) => (
-                            <article key={stringValue(lease.id)}>
-                              <span className="unit-lease-history-icon"><FileText size={17} /></span>
-                              <div>
-                                <strong>{stringValue(nested(lease, "tenancy", "tenant", "legalName"), "Tenant")}</strong>
-                                <small>
-                                  {stringValue(lease.status, "Lease").replaceAll("_", " ")} · {dateLabel(lease.startDate)} – {dateLabel(lease.endDate)}
-                                </small>
-                              </div>
-                              <b>{formatAmount(lease.rentAmount, currency)}<small>/month</small></b>
-                            </article>
-                          ))}
+                          {unitLeases.map((lease) => {
+                            const leaseId = stringValue(lease.id, "");
+                            const tenantName = stringValue(
+                              nested(lease, "tenancy", "tenant", "legalName"),
+                              "Tenant",
+                            );
+                            const hasGeneratedAgreement = rowsFor(
+                              record(lease.tenantLeaseOnboarding),
+                              "snapshots",
+                            ).length > 0;
+                            const latestTerminationRequest = rowsFor(
+                              lease,
+                              "terminationRequests",
+                            )[0];
+                            const terminationExpiresAt = latestTerminationRequest
+                              ? new Date(String(latestTerminationRequest.expiresAt ?? ""))
+                              : null;
+                            const terminationRequestPending = Boolean(
+                              latestTerminationRequest &&
+                              !latestTerminationRequest.respondedAt &&
+                              terminationExpiresAt &&
+                              terminationExpiresAt > new Date(),
+                            );
+                            const terminationRequestStatus = latestTerminationRequest
+                              ? latestTerminationRequest.respondedAt
+                                ? latestTerminationRequest.accepted === true
+                                  ? "Tenant confirmed termination"
+                                  : "Tenant declined termination"
+                                : terminationRequestPending
+                                  ? `Awaiting tenant confirmation until ${dateLabel(latestTerminationRequest.expiresAt)}`
+                                  : "Termination request expired"
+                              : null;
+                            const canRequestTermination =
+                              canEdit &&
+                              ["ACTIVE", "TENANT_ACCEPTED"].includes(
+                                stringValue(lease.status, ""),
+                              ) &&
+                              !terminationRequestPending;
+                            return (
+                              <article key={leaseId}>
+                                <span className="unit-lease-history-icon"><FileText size={17} /></span>
+                                <div>
+                                  <strong>{tenantName}</strong>
+                                  <small>
+                                    {stringValue(lease.status, "Lease").replaceAll("_", " ")} · {dateLabel(lease.startDate)} – {dateLabel(lease.endDate)}
+                                  </small>
+                                  {hasGeneratedAgreement && (
+                                    <button
+                                      className="unit-lease-view-agreement"
+                                      type="button"
+                                      onClick={() => void viewLeaseAgreement(leaseId)}
+                                      aria-label={`View lease agreement PDF for ${tenantName}`}
+                                    >
+                                      <Eye size={13} /> View PDF
+                                    </button>
+                                  )}
+                                  {terminationRequestStatus && (
+                                    <small className="unit-termination-request-status">
+                                      {terminationRequestStatus}
+                                    </small>
+                                  )}
+                                  {canRequestTermination && (
+                                    <button
+                                      className="unit-lease-view-agreement unit-lease-terminate"
+                                      type="button"
+                                      onClick={() => onRequestTermination(lease)}
+                                    >
+                                      Terminate lease
+                                    </button>
+                                  )}
+                                </div>
+                                <b>{formatAmount(lease.rentAmount, currency)}<small>/month</small></b>
+                              </article>
+                            );
+                          })}
                         </div>
                       ) : (
                         <div className="unit-lease-empty">
@@ -5860,6 +6157,173 @@ function TextEntryDialog({
   );
 }
 
+function TenantLeaseExistingTenancyDialog({
+  organisationId,
+  tenancies,
+  units,
+  currency,
+  onClose,
+  onComplete,
+}: {
+  organisationId: string;
+  tenancies: ValueRecord[];
+  units: ValueRecord[];
+  currency: string;
+  onClose: () => void;
+  onComplete: (emailSent: boolean) => void;
+}) {
+  const [tenancyId, setTenancyId] = useState("");
+  const tenancy = tenancies.find((row) => stringValue(row.id, "") === tenancyId);
+  if (tenancy) {
+    const property = record(
+      nested(tenancy, "property") ?? nested(tenancy, "unit", "property"),
+    );
+    return (
+      <TenantLeaseOnboardingDialog
+        organisationId={organisationId}
+        property={property}
+        units={units.filter((unit) => propertyIdFrom(unit) === stringValue(property.id, ""))}
+        tenancies={tenancies}
+        initialUnitId={stringValue(nested(tenancy, "unit", "id"), "") || null}
+        initialTenant={record(nested(tenancy, "tenant"))}
+        existingTenancy={tenancy}
+        currency={currency}
+        onClose={onClose}
+        onComplete={onComplete}
+      />
+    );
+  }
+  const eligibleTenancies = tenancies.filter((row) =>
+    ["ACTIVE", "UPCOMING"].includes(stringValue(row.status, "")),
+  );
+  return (
+    <div className="landlord-form-modal-backdrop" onMouseDown={(event) => {
+      if (event.target === event.currentTarget) onClose();
+    }}>
+      <section className="landlord-form-modal property-onboarding-dialog" role="dialog" aria-modal="true" aria-labelledby="lease-existing-tenancy-title">
+        <header className="landlord-form-modal-header">
+          <span className="landlord-form-modal-icon" aria-hidden="true"><FileText size={20} /></span>
+          <div>
+            <span className="dashboard-date">LEASE SETUP</span>
+            <h2 id="lease-existing-tenancy-title">Choose a tenancy</h2>
+            <p>Create an agreement for an existing tenant and rental space.</p>
+          </div>
+          <button type="button" className="landlord-form-modal-close" aria-label="Close tenancy selection" onClick={onClose}><X size={19} /></button>
+        </header>
+        <div className="property-onboarding-content">
+          <label className="landlord-field">
+            <span>Active or upcoming tenancy <i aria-hidden="true">*</i></span>
+            <select required value={tenancyId} onChange={(event) => setTenancyId(event.target.value)}>
+              <option value="">Select a tenancy</option>
+              {eligibleTenancies.map((row) => (
+                <option key={stringValue(row.id)} value={stringValue(row.id)}>
+                  {stringValue(nested(row, "tenant", "legalName"), "Tenant")} · {stringValue(nested(row, "property", "name"), stringValue(nested(row, "unit", "property", "name"), "Property"))} · {stringValue(nested(row, "unit", "unitNumber"), "Entire property")}
+                </option>
+              ))}
+            </select>
+          </label>
+          {!eligibleTenancies.length && <p className="property-onboarding-error" role="alert">Create an active or upcoming tenancy before adding a lease.</p>}
+        </div>
+        <footer className="landlord-form-actions">
+          <button className="dashboard-secondary-button" type="button" onClick={onClose}>Cancel</button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+function TenantLeaseAssignmentDialog({
+  organisationId,
+  tenant,
+  tenants,
+  properties,
+  units,
+  tenancies,
+  currency,
+  onClose,
+  onComplete,
+}: {
+  organisationId: string;
+  tenant?: ValueRecord;
+  tenants: ValueRecord[];
+  properties: ValueRecord[];
+  units: ValueRecord[];
+  tenancies: ValueRecord[];
+  currency: string;
+  onClose: () => void;
+  onComplete: (emailSent: boolean) => void;
+}) {
+  const [propertyId, setPropertyId] = useState(() =>
+    properties.length === 1 ? stringValue(properties[0].id, "") : "",
+  );
+  const [tenantId, setTenantId] = useState(stringValue(tenant?.id, ""));
+  const property = properties.find((row) => stringValue(row.id, "") === propertyId);
+  const selectedTenant =
+    (tenant?.id ? tenant : tenants.find((row) => stringValue(row.id, "") === tenantId));
+  if (property && selectedTenant) {
+    return (
+      <TenantLeaseOnboardingDialog
+        organisationId={organisationId}
+        property={property}
+        units={units.filter((unit) => propertyIdFrom(unit) === propertyId)}
+        tenancies={tenancies}
+        initialUnitId={null}
+        initialTenant={selectedTenant}
+        currency={currency}
+        onClose={onClose}
+        onComplete={onComplete}
+      />
+    );
+  }
+  return (
+    <div className="landlord-form-modal-backdrop" onMouseDown={(event) => {
+      if (event.target === event.currentTarget) onClose();
+    }}>
+      <section className="landlord-form-modal property-onboarding-dialog" role="dialog" aria-modal="true" aria-labelledby="tenant-lease-assignment-title">
+        <header className="landlord-form-modal-header">
+          <span className="landlord-form-modal-icon" aria-hidden="true"><Building2 size={20} /></span>
+          <div>
+            <span className="dashboard-date">ASSIGN TENANT</span>
+            <h2 id="tenant-lease-assignment-title">Choose a property</h2>
+            <p>Choose the property and tenant to start a lease offer.</p>
+          </div>
+          <button type="button" className="landlord-form-modal-close" aria-label="Close property selection" onClick={onClose}><X size={19} /></button>
+        </header>
+        <div className="property-onboarding-content">
+          <label className="landlord-field">
+            <span>Property <i aria-hidden="true">*</i></span>
+            <select required value={propertyId} onChange={(event) => setPropertyId(event.target.value)}>
+              <option value="">Select a property</option>
+              {properties.map((row) => (
+                <option key={stringValue(row.id)} value={stringValue(row.id)}>
+                  {stringValue(row.name, "Property")}
+                </option>
+              ))}
+            </select>
+          </label>
+          {!tenant?.id && (
+            <label className="landlord-field">
+              <span>Tenant <i aria-hidden="true">*</i></span>
+              <select required value={tenantId} onChange={(event) => setTenantId(event.target.value)}>
+                <option value="">Select a tenant</option>
+                {tenants.map((row) => (
+                  <option key={stringValue(row.id)} value={stringValue(row.id)}>
+                    {stringValue(row.legalName, "Tenant")} · {stringValue(row.email)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          {!properties.length && <p className="property-onboarding-error" role="alert">Create a property before assigning a tenant.</p>}
+        </div>
+        <footer className="landlord-form-actions">
+          <button className="dashboard-secondary-button" type="button" onClick={onClose}>Cancel</button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
 function TenantLeaseOnboardingDialog({
   organisationId,
   property,
@@ -5867,6 +6331,8 @@ function TenantLeaseOnboardingDialog({
   tenancies,
   initialUnitId,
   fixedUnitId = null,
+  initialTenant,
+  existingTenancy,
   currency,
   onClose,
   onComplete,
@@ -5877,6 +6343,8 @@ function TenantLeaseOnboardingDialog({
   tenancies: ValueRecord[];
   initialUnitId: string | null;
   fixedUnitId?: string | null;
+  initialTenant?: ValueRecord;
+  existingTenancy?: ValueRecord;
   currency: string;
   onClose: () => void;
   onComplete: (emailSent: boolean) => void;
@@ -5884,19 +6352,24 @@ function TenantLeaseOnboardingDialog({
   const [step, setStep] = useState(0);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [previewing, setPreviewing] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [agreementValues, setAgreementValues] = useState(() => defaultLeaseAgreementValues(currency));
+  const formRef = useRef<HTMLFormElement>(null);
   const today = new Date().toISOString().slice(0, 10);
   const yearAhead = `${new Date().getFullYear() + 1}-${today.slice(5)}`;
   const fixedUnit = fixedUnitId
     ? units.find((unit) => stringValue(unit.id, "") === fixedUnitId)
     : undefined;
+  const isExistingTenancy = Boolean(existingTenancy?.id);
   const [values, setValues] = useState({
-    unitId: initialUnitId ?? "",
-    legalName: "",
-    email: "",
-    phone: "",
-    emergencyContactName: "",
-    emergencyContactPhone: "",
-    moveInDate: today,
+    unitId: initialUnitId ?? stringValue(nested(existingTenancy, "unit", "id"), ""),
+    legalName: stringValue(initialTenant?.legalName, ""),
+    email: stringValue(initialTenant?.email, ""),
+    phone: stringValue(initialTenant?.phone, ""),
+    emergencyContactName: stringValue(initialTenant?.emergencyContactName, ""),
+    emergencyContactPhone: stringValue(initialTenant?.emergencyContactPhone, ""),
+    moveInDate: stringValue(existingTenancy?.moveInDate, today).slice(0, 10),
     startDate: today,
     endDate: yearAhead,
     rentAmount: String(fixedUnit?.rentAmount ?? ""),
@@ -5914,22 +6387,61 @@ function TenantLeaseOnboardingDialog({
         ["ACTIVE", "UPCOMING"].includes(stringValue(tenancy.status, "")),
     ),
   );
-  const standalone = units.length === 0;
+  const standalone = units.length === 0 || (isExistingTenancy && !nested(existingTenancy, "unit", "id"));
+  const existingUnit = nested(existingTenancy, "unit");
   const selectedUnit = fixedUnitId
     ? fixedUnit
-    : availableUnits.find((unit) => stringValue(unit.id, "") === values.unitId);
+    : isExistingTenancy
+      ? existingUnit ? record(existingUnit) : undefined
+      : availableUnits.find((unit) => stringValue(unit.id, "") === values.unitId);
   const update = (name: keyof typeof values, value: string) => {
+    invalidatePreview();
     setValues((current) => ({ ...current, [name]: value }));
   };
-  const tenantStep = fixedUnitId ? 0 : 1;
+  function invalidatePreview() {
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    setPreviewUrl(null);
+  }
+  function updateAgreement(name: string, value: string) {
+    invalidatePreview();
+    setAgreementValues((current) => ({ ...current, [name]: value }));
+  }
+  const tenantStep = fixedUnitId || isExistingTenancy ? 0 : 1;
   const leaseStep = tenantStep + 1;
-  const reviewStep = leaseStep + 1;
-  const steps = fixedUnitId
-    ? ["Tenant details", "Lease & finances", "Review & send"]
-    : ["Rental space", "Tenant", "Lease & finances", "Review"];
+  const agreementStep = leaseStep + 1;
+  const reviewStep = agreementStep + 1;
+  const steps = fixedUnitId || isExistingTenancy
+    ? ["Tenant details", "Lease & finances", "Agreement details", "Preview & send"]
+    : ["Rental space", "Tenant", "Lease & finances", "Agreement details", "Preview & send"];
+
+  useEffect(() => () => {
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+  }, [previewUrl]);
 
   function continueToNextStep() {
-    if (!fixedUnitId && step === 0 && !standalone && !availableUnits.some((unit) => stringValue(unit.id, "") === values.unitId)) {
+    const invalidField = formRef.current?.querySelector<HTMLElement>(
+      ".property-onboarding-content :invalid",
+    );
+    if (invalidField) {
+      const fieldLabel = invalidField
+        .closest(".landlord-field")
+        ?.querySelector("span")
+        ?.textContent?.replace(/\*/g, "")
+        .trim();
+      setError(
+        `${fieldLabel || "This field"} is required or invalid. Correct it before continuing.`,
+      );
+      invalidField.focus();
+      if (
+        invalidField instanceof HTMLInputElement ||
+        invalidField instanceof HTMLSelectElement ||
+        invalidField instanceof HTMLTextAreaElement
+      ) {
+        invalidField.reportValidity();
+      }
+      return;
+    }
+    if (!fixedUnitId && !isExistingTenancy && step === 0 && !standalone && !availableUnits.some((unit) => stringValue(unit.id, "") === values.unitId)) {
       setError("Select an available rental space.");
       return;
     }
@@ -5952,8 +6464,71 @@ function TenantLeaseOnboardingDialog({
     setStep((current) => Math.min(reviewStep, current + 1));
   }
 
+  function buildLeasePayload() {
+    return {
+      propertyId,
+      unitId: values.unitId || null,
+      ...(isExistingTenancy ? { tenancyId: stringValue(existingTenancy?.id, "") } : {}),
+      tenant: {
+        legalName: values.legalName.trim(),
+        email: values.email.trim(),
+        phone: values.phone.trim(),
+        emergencyContactName: values.emergencyContactName.trim() || undefined,
+        emergencyContactPhone: values.emergencyContactPhone.trim() || undefined,
+      },
+      moveInDate: isExistingTenancy
+        ? stringValue(existingTenancy?.moveInDate, values.moveInDate).slice(0, 10)
+        : values.moveInDate,
+      lease: {
+        startDate: values.startDate,
+        endDate: values.endDate,
+        rentAmount: values.rentAmount,
+        depositAmount: values.depositAmount,
+        dueDay: Number(values.dueDay),
+        paymentFrequency: values.paymentFrequency,
+        terms: values.terms.trim()
+          ? { additionalTerms: values.terms.trim() }
+          : undefined,
+        agreement: serializeLeaseAgreementValues(agreementValues),
+      },
+    };
+  }
+
+  async function generatePreview() {
+    setPreviewing(true);
+    setError("");
+    try {
+      const request = () => fetch(
+        `${apiBaseUrl}/organisations/${organisationId}/landlord/tenant-lease-onboardings/preview`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(buildLeasePayload()),
+        },
+      );
+      let response = await request();
+      if (response.status === 401 && await refreshSession()) response = await request();
+      if (!response.ok) {
+        const body = await response.json().catch(() => undefined) as ApiError | undefined;
+        const message = Array.isArray(body?.message) ? body.message.join(". ") : body?.message;
+        throw new Error(message || `Preview request failed (${response.status})`);
+      }
+      invalidatePreview();
+      setPreviewUrl(URL.createObjectURL(await response.blob()));
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "The agreement preview could not be generated.");
+    } finally {
+      setPreviewing(false);
+    }
+  }
+
   async function sendLease(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!previewUrl) {
+      setError("Generate and review the agreement preview before sending it.");
+      return;
+    }
     setError("");
     setSaving(true);
     try {
@@ -5961,29 +6536,7 @@ function TenantLeaseOnboardingDialog({
         `/organisations/${organisationId}/landlord/tenant-lease-onboardings`,
         {
           method: "POST",
-          body: JSON.stringify({
-            propertyId,
-            unitId: values.unitId || null,
-            tenant: {
-              legalName: values.legalName.trim(),
-              email: values.email.trim(),
-              phone: values.phone.trim() || undefined,
-              emergencyContactName: values.emergencyContactName.trim() || undefined,
-              emergencyContactPhone: values.emergencyContactPhone.trim() || undefined,
-            },
-            moveInDate: values.moveInDate,
-            lease: {
-              startDate: values.startDate,
-              endDate: values.endDate,
-              rentAmount: values.rentAmount,
-              depositAmount: values.depositAmount,
-              dueDay: Number(values.dueDay),
-              paymentFrequency: values.paymentFrequency,
-              terms: values.terms.trim()
-                ? { additionalTerms: values.terms.trim() }
-                : undefined,
-            },
-          }),
+          body: JSON.stringify(buildLeasePayload()),
         },
       );
       onComplete(result.emailSent === true);
@@ -5998,26 +6551,26 @@ function TenantLeaseOnboardingDialog({
     <div className={`landlord-form-modal-backdrop${fixedUnitId ? " property-setup-backdrop" : ""}`} onMouseDown={(event) => {
       if (event.target === event.currentTarget && !saving) onClose();
     }}>
-      <section className={`landlord-form-modal property-onboarding-dialog${fixedUnitId ? " property-setup-drawer property-create-drawer tenant-lease-assignment-drawer" : ""}`} role="dialog" aria-modal="true" aria-labelledby="tenant-lease-onboarding-title">
+      <section className={`landlord-form-modal property-onboarding-dialog${fixedUnitId || isExistingTenancy ? " property-setup-drawer property-create-drawer tenant-lease-assignment-drawer" : ""}`} role="dialog" aria-modal="true" aria-labelledby="tenant-lease-onboarding-title">
         <header className="landlord-form-modal-header">
           <span className="landlord-form-modal-icon" aria-hidden="true"><Users size={20} /></span>
           <div>
-            <span className="dashboard-date">{fixedUnitId ? "ASSIGN TENANT" : "TENANT & LEASE SETUP"}</span>
-            <h2 id="tenant-lease-onboarding-title">{fixedUnitId ? "Offer a lease to a tenant" : "Add tenant and create lease"}</h2>
+            <span className="dashboard-date">{fixedUnitId || isExistingTenancy ? "LEASE SETUP" : "TENANT & LEASE SETUP"}</span>
+            <h2 id="tenant-lease-onboarding-title">{isExistingTenancy ? "Create a lease for this tenancy" : fixedUnitId ? "Offer a lease to a tenant" : "Add tenant and create lease"}</h2>
             <p>{stringValue(property.name, "Property")}{selectedUnit ? ` · Unit ${stringValue(selectedUnit.unitNumber)}` : ""} · Send a lease for review; no payment is recorded.</p>
           </div>
           <button type="button" className="landlord-form-modal-close" aria-label="Close tenant and lease setup" onClick={onClose} disabled={saving}><X size={19} /></button>
         </header>
-        <nav className={`property-onboarding-steps${fixedUnitId ? " is-compact" : ""}`} aria-label="Registration steps">
+        <nav className={`property-onboarding-steps${fixedUnitId || isExistingTenancy ? " is-compact" : ""}`} aria-label="Registration steps">
           {steps.map((label, index) => (
             <button type="button" key={label} className={index === step ? "is-current" : index < step ? "is-complete" : ""} onClick={() => index < step && setStep(index)}>
               <span>{index + 1}</span>{label}
             </button>
           ))}
         </nav>
-        <form className={`property-onboarding-form${fixedUnitId ? " tenant-lease-assignment-form" : ""}`} onSubmit={sendLease}>
+        <form ref={formRef} className={`property-onboarding-form${fixedUnitId || isExistingTenancy ? " tenant-lease-assignment-form" : ""}`} onSubmit={sendLease}>
           <div className="property-onboarding-content">
-            {!fixedUnitId && step === 0 && (
+            {!fixedUnitId && !isExistingTenancy && step === 0 && (
               <>
                 <h3>Choose a rental space</h3>
                 {standalone ? (
@@ -6033,6 +6586,7 @@ function TenantLeaseOnboardingDialog({
                       value={values.unitId}
                       onChange={(event) => {
                         const unit = availableUnits.find((item) => stringValue(item.id, "") === event.target.value);
+                        invalidatePreview();
                         setValues((current) => ({
                           ...current,
                           unitId: event.target.value,
@@ -6060,8 +6614,8 @@ function TenantLeaseOnboardingDialog({
                 <div className="property-onboarding-fields">
                   <label className="landlord-field"><span>Full name <i aria-hidden="true">*</i></span><input required value={values.legalName} onChange={(event) => update("legalName", event.target.value)} /></label>
                   <label className="landlord-field"><span>Email <i aria-hidden="true">*</i></span><input required type="email" value={values.email} onChange={(event) => update("email", event.target.value)} /></label>
-                  <label className="landlord-field"><span>Phone</span><input value={values.phone} onChange={(event) => update("phone", event.target.value)} /></label>
-                  <label className="landlord-field"><span>Move-in date <i aria-hidden="true">*</i></span><input required type="date" value={values.moveInDate} onChange={(event) => update("moveInDate", event.target.value)} /></label>
+                  <label className="landlord-field"><span>Phone <i aria-hidden="true">*</i></span><input required value={values.phone} onChange={(event) => update("phone", event.target.value)} /></label>
+                  <label className="landlord-field"><span>Move-in date <i aria-hidden="true">*</i></span><input required type="date" readOnly={isExistingTenancy} value={values.moveInDate} onChange={(event) => update("moveInDate", event.target.value)} /></label>
                   <label className="landlord-field"><span>Emergency contact</span><input value={values.emergencyContactName} onChange={(event) => update("emergencyContactName", event.target.value)} /></label>
                   <label className="landlord-field"><span>Emergency contact phone</span><input value={values.emergencyContactPhone} onChange={(event) => update("emergencyContactPhone", event.target.value)} /></label>
                 </div>
@@ -6081,8 +6635,15 @@ function TenantLeaseOnboardingDialog({
                   <label className="landlord-field"><span>Security deposit ({currency}) <i aria-hidden="true">*</i></span><input required min="0" step={currency === "RWF" ? "1" : "0.01"} type="number" value={values.depositAmount} onChange={(event) => update("depositAmount", event.target.value)} /></label>
                   <label className="landlord-field"><span>Rent due day <i aria-hidden="true">*</i></span><input required min="1" max="31" type="number" value={values.dueDay} onChange={(event) => update("dueDay", event.target.value)} /></label>
                   <label className="landlord-field"><span>Payment frequency <i aria-hidden="true">*</i></span><select value={values.paymentFrequency} onChange={(event) => update("paymentFrequency", event.target.value)}><option value="MONTHLY">Monthly</option></select></label>
-                  <label className="landlord-field is-wide"><span>Additional terms</span><textarea rows={3} value={values.terms} onChange={(event) => update("terms", event.target.value)} /></label>
+                  <label className="landlord-field is-wide"><span>Special conditions (optional)</span><textarea rows={3} maxLength={4000} value={values.terms} onChange={(event) => update("terms", event.target.value)} /></label>
                 </div>
+              </>
+            )}
+            {step === agreementStep && (
+              <>
+                <h3>Agreement details</h3>
+                <p className="lease-agreement-intro">Complete the agreement fields before generating the tenant's review copy. A lawyer or notary should review the final document where required by local law.</p>
+                <LeaseAgreementFields values={agreementValues} onChange={updateAgreement} />
               </>
             )}
             {step === reviewStep && (
@@ -6093,13 +6654,22 @@ function TenantLeaseOnboardingDialog({
                   ["Tenant", `${values.legalName} · ${values.email}`, tenantStep],
                   ["Lease", `${dateLabel(values.startDate)} – ${dateLabel(values.endDate)} · ${values.paymentFrequency.toLowerCase()}`, leaseStep],
                   ["Rent & deposit", `${formatAmount(values.rentAmount, currency)} rent · ${formatAmount(values.depositAmount, currency)} deposit · Due day ${values.dueDay}`, leaseStep],
+                  ["Agreement", `${agreementValues.landlordName} · ${agreementValues.currency} · ${agreementValues.paymentMethod.replace("_", " ").toLowerCase()}`, agreementStep],
                 ].map(([label, detail, editStep]) => (
                   <div key={String(label)}>
                     <span><strong>{String(label)}</strong><small>{String(detail)}</small></span>
                     <button type="button" onClick={() => setStep(Number(editStep))}>Edit</button>
                   </div>
                 ))}
-                <p>The lease document will be generated from these details and emailed to the tenant as a secure review link. Sending does not activate the lease or record rent or deposit payments.</p>
+                <p>The tenant receives the agreement only after you review the generated preview and choose to send it. A deposit marked as paid is added to the deposit ledger; sending does not activate the lease or record rent payments.</p>
+                {previewUrl ? (
+                  <div className="lease-agreement-preview">
+                    <h4>Generated agreement preview</h4>
+                    <iframe title="Generated lease agreement preview" src={previewUrl} />
+                  </div>
+                ) : (
+                  <p className="lease-agreement-preview-notice">Generate a PDF preview to enable sending this agreement.</p>
+                )}
               </div>
             )}
           </div>
@@ -6109,10 +6679,16 @@ function TenantLeaseOnboardingDialog({
             {step < reviewStep ? (
               <button className="dashboard-primary-button" type="button" onClick={continueToNextStep}>Continue</button>
             ) : (
-              <button className="dashboard-primary-button" type="submit" disabled={saving}>
-                {saving ? <LoaderCircle className="landlord-spinner" size={15} /> : <Send size={15} />}
-                {saving ? "Sending lease…" : "Send lease for review"}
-              </button>
+              <>
+                <button className="dashboard-secondary-button" type="button" onClick={() => void generatePreview()} disabled={saving || previewing}>
+                  {previewing ? <LoaderCircle className="landlord-spinner" size={15} /> : <FileText size={15} />}
+                  {previewing ? "Generating preview…" : previewUrl ? "Regenerate preview" : "Generate preview"}
+                </button>
+                <button className="dashboard-primary-button" type="submit" disabled={saving || previewing || !previewUrl}>
+                  {saving ? <LoaderCircle className="landlord-spinner" size={15} /> : <Send size={15} />}
+                  {saving ? "Sending lease…" : "Send lease for review"}
+                </button>
+              </>
             )}
           </footer>
         </form>
@@ -6531,6 +7107,17 @@ function TenantLeaseResendDialog({
 }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const [previewing, setPreviewing] = useState(false);
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const formRef = useRef<HTMLFormElement>(null);
+  const latestSnapshot = rowsFor(
+    record(nested(lease, "tenantLeaseOnboarding")),
+    "snapshots",
+  )[0];
+  const snapshotAgreement = record(
+    nested(latestSnapshot, "agreement", "lease", "agreement"),
+  );
+  const priorTerms = record(lease.terms);
   const [values, setValues] = useState({
     legalName: stringValue(tenant.legalName, ""),
     email: stringValue(tenant.email, ""),
@@ -6543,28 +7130,94 @@ function TenantLeaseResendDialog({
     rentAmount: stringValue(lease.rentAmount, ""),
     depositAmount: stringValue(deposit.requiredAmount, ""),
     dueDay: stringValue(lease.dueDay, "1"),
-    terms: JSON.stringify(record(lease.terms), null, 2),
+    terms: stringValue(priorTerms.additionalTerms, ""),
   });
+  const [agreementValues, setAgreementValues] = useState(() =>
+    leaseAgreementValuesFromSnapshot(currency, snapshotAgreement),
+  );
+  const propertyId = stringValue(nested(tenancy, "property", "id"), "");
+  const unitId = stringValue(nested(tenancy, "unit", "id"), "");
   const update = (name: keyof typeof values, value: string) => {
+    invalidatePreview();
     setValues((current) => ({ ...current, [name]: value }));
   };
+  function invalidatePreview() {
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    setPreviewUrl(null);
+  }
+  function updateAgreement(name: string, value: string) {
+    invalidatePreview();
+    setAgreementValues((current) => ({ ...current, [name]: value }));
+  }
+  useEffect(() => () => {
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+  }, [previewUrl]);
+
+  function buildPayload() {
+    return {
+      propertyId,
+      unitId: unitId || null,
+      tenant: {
+        legalName: values.legalName.trim(),
+        email: values.email.trim(),
+        phone: values.phone.trim(),
+        emergencyContactName: values.emergencyContactName.trim() || undefined,
+        emergencyContactPhone: values.emergencyContactPhone.trim() || undefined,
+      },
+      moveInDate: values.moveInDate,
+      lease: {
+        startDate: values.startDate,
+        endDate: values.endDate,
+        rentAmount: values.rentAmount,
+        depositAmount: values.depositAmount,
+        dueDay: Number(values.dueDay),
+        paymentFrequency: "MONTHLY",
+        terms: values.terms.trim()
+          ? { additionalTerms: values.terms.trim() }
+          : undefined,
+        agreement: serializeLeaseAgreementValues(agreementValues),
+      },
+    };
+  }
+
+  async function generatePreview() {
+    setPreviewing(true);
+    setError("");
+    try {
+      const request = () => fetch(
+        `${apiBaseUrl}/organisations/${organisationId}/landlord/tenant-lease-onboardings/preview`,
+        {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(buildPayload()),
+        },
+      );
+      let response = await request();
+      if (response.status === 401 && await refreshSession()) response = await request();
+      if (!response.ok) {
+        const body = await response.json().catch(() => undefined) as ApiError | undefined;
+        const message = Array.isArray(body?.message) ? body.message.join(". ") : body?.message;
+        throw new Error(message || `Preview request failed (${response.status})`);
+      }
+      invalidatePreview();
+      setPreviewUrl(URL.createObjectURL(await response.blob()));
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "The agreement preview could not be generated.");
+    } finally {
+      setPreviewing(false);
+    }
+  }
 
   async function resend(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!previewUrl) {
+      setError("Generate and review the updated agreement preview before resending it.");
+      return;
+    }
     const leaseId = stringValue(lease.id, "");
     if (!leaseId) {
       setError("The lease record could not be identified.");
-      return;
-    }
-    let terms: unknown;
-    try {
-      terms = values.terms.trim() ? JSON.parse(values.terms) as unknown : {};
-    } catch {
-      setError("Enter valid JSON for the additional agreement terms.");
-      return;
-    }
-    if (!terms || typeof terms !== "object" || Array.isArray(terms)) {
-      setError("Additional agreement terms must be a JSON object.");
       return;
     }
     setSaving(true);
@@ -6590,7 +7243,10 @@ function TenantLeaseResendDialog({
               depositAmount: values.depositAmount,
               dueDay: Number(values.dueDay),
               paymentFrequency: "MONTHLY",
-              terms,
+              terms: values.terms.trim()
+                ? { additionalTerms: values.terms.trim() }
+                : {},
+              agreement: serializeLeaseAgreementValues(agreementValues),
             },
           }),
         },
@@ -6617,12 +7273,12 @@ function TenantLeaseResendDialog({
           </div>
           <button type="button" className="landlord-form-modal-close" aria-label="Close lease editor" onClick={onClose} disabled={saving}><X size={19} /></button>
         </header>
-        <form className="property-onboarding-form" onSubmit={resend}>
+        <form ref={formRef} className="property-onboarding-form" onSubmit={resend}>
           <div className="property-onboarding-content">
             <div className="property-onboarding-fields">
               <label className="landlord-field"><span>Tenant name <i aria-hidden="true">*</i></span><input required value={values.legalName} onChange={(event) => update("legalName", event.target.value)} /></label>
               <label className="landlord-field"><span>Email <i aria-hidden="true">*</i></span><input required type="email" value={values.email} onChange={(event) => update("email", event.target.value)} /></label>
-              <label className="landlord-field"><span>Phone</span><input value={values.phone} onChange={(event) => update("phone", event.target.value)} /></label>
+              <label className="landlord-field"><span>Phone <i aria-hidden="true">*</i></span><input required value={values.phone} onChange={(event) => update("phone", event.target.value)} /></label>
               <label className="landlord-field"><span>Emergency contact</span><input value={values.emergencyContactName} onChange={(event) => update("emergencyContactName", event.target.value)} /></label>
               <label className="landlord-field"><span>Emergency contact phone</span><input value={values.emergencyContactPhone} onChange={(event) => update("emergencyContactPhone", event.target.value)} /></label>
               <label className="landlord-field"><span>Move-in date <i aria-hidden="true">*</i></span><input required type="date" value={values.moveInDate} onChange={(event) => update("moveInDate", event.target.value)} /></label>
@@ -6632,13 +7288,26 @@ function TenantLeaseResendDialog({
               <label className="landlord-field"><span>Security deposit ({currency}) <i aria-hidden="true">*</i></span><input required min="0" step="0.01" type="number" value={values.depositAmount} onChange={(event) => update("depositAmount", event.target.value)} /></label>
               <label className="landlord-field"><span>Rent due day <i aria-hidden="true">*</i></span><input required min="1" max="28" type="number" value={values.dueDay} onChange={(event) => update("dueDay", event.target.value)} /></label>
               <label className="landlord-field"><span>Payment frequency</span><input value="Monthly" readOnly /></label>
-              <label className="landlord-field is-wide"><span>Additional agreement terms (JSON object)</span><textarea rows={4} value={values.terms} onChange={(event) => update("terms", event.target.value)} /></label>
+              <label className="landlord-field is-wide"><span>Special conditions (optional)</span><textarea rows={4} maxLength={4000} value={values.terms} onChange={(event) => update("terms", event.target.value)} /></label>
             </div>
+            <h3 className="lease-agreement-resend-heading">Agreement details</h3>
+            <LeaseAgreementFields values={agreementValues} onChange={updateAgreement} />
+            <p className="lease-agreement-intro">Review the updated PDF before sending the new version to the tenant.</p>
+            {previewUrl && (
+              <div className="lease-agreement-preview">
+                <h4>Updated agreement preview</h4>
+                <iframe title="Updated lease agreement preview" src={previewUrl} />
+              </div>
+            )}
             {error && <p className="property-onboarding-error" role="alert">{error}</p>}
           </div>
           <footer className="landlord-form-actions">
             <button className="dashboard-secondary-button" type="button" onClick={onClose} disabled={saving}>Cancel</button>
-            <button className="dashboard-primary-button" type="submit" disabled={saving}>
+            <button className="dashboard-secondary-button" type="button" onClick={() => void generatePreview()} disabled={saving || previewing}>
+              {previewing ? <LoaderCircle className="landlord-spinner" size={15} /> : <FileText size={15} />}
+              {previewing ? "Generating preview…" : previewUrl ? "Regenerate preview" : "Generate preview"}
+            </button>
+            <button className="dashboard-primary-button" type="submit" disabled={saving || previewing || !previewUrl}>
               {saving ? <LoaderCircle className="landlord-spinner" size={15} /> : <Send size={15} />}
               {saving ? "Resending lease…" : "Resend for tenant review"}
             </button>
@@ -6651,26 +7320,39 @@ function TenantLeaseResendDialog({
 
 function PropertyOwnerList({
   rows,
+  summaries,
+  currency,
+  onManage,
   onEdit,
 }: {
   rows: ValueRecord[];
+  summaries: ClientPortfolioSummary[];
+  currency: string;
+  onManage: (owner: ValueRecord) => void;
   onEdit?: (row: ValueRecord) => void;
 }) {
   const [search, setSearch] = useState("");
-  if (!rows.length) return null;
   const visibleRows = rows.filter((owner) =>
     [owner.name, owner.email, owner.phone]
       .some((value) => stringValue(value, "").toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())),
   );
+  const paymentLabels: Record<ClientPortfolioSummary["paymentStatus"], string> = {
+    UP_TO_DATE: "Up to date",
+    PAYMENT_DUE: "Balance due",
+    OVERDUE: "Overdue",
+    NOT_CHARGED: "Not charged",
+    NO_ACTIVE_TENANTS: "No active rent",
+    NO_PROPERTIES: "No properties",
+  };
   return (
     <div className="landlord-record-table-wrap">
       <div className="landlord-directory-controls">
         <label className="landlord-directory-search">
           <Search size={16} aria-hidden="true" />
-          <span className="visually-hidden">Search property owners</span>
+          <span className="visually-hidden">Search clients</span>
           <input
             type="search"
-            placeholder="Search owner name or contact…"
+            placeholder="Search client name or contact…"
             value={search}
             onChange={(event) => setSearch(event.currentTarget.value)}
           />
@@ -6679,29 +7361,173 @@ function PropertyOwnerList({
       <table className="landlord-record-table">
         <thead>
           <tr>
-            <th scope="col">Owner</th>
+            <th scope="col">Client</th>
             <th scope="col">Contact</th>
             <th scope="col">Properties</th>
-            {onEdit && <th scope="col"><span className="visually-hidden">Actions</span></th>}
+            <th scope="col">Occupancy</th>
+            <th scope="col">Current payments</th>
+            <th scope="col">Balance due</th>
+            <th scope="col"><span className="visually-hidden">Actions</span></th>
           </tr>
         </thead>
         <tbody>
           {visibleRows.length === 0 ? (
-            <tr><td colSpan={onEdit ? 4 : 3}>No owners match your search.</td></tr>
+            <tr><td colSpan={7}>{rows.length === 0 ? "No clients have been added yet." : "No clients match your search."}</td></tr>
           ) : visibleRows.map((owner) => (
-            <tr key={stringValue(owner.id)}>
-              <td><div className="landlord-record-main"><b>{stringValue(owner.name)}</b></div></td>
-              <td><div className="landlord-record-details">
-                {typeof owner.email === "string" && <small>{owner.email}</small>}
-                {typeof owner.phone === "string" && <small>{owner.phone}</small>}
-              </div></td>
-              <td>{stringValue(nested(owner, "_count", "properties"), "0")}</td>
-              {onEdit && <td><button className="landlord-text-action" type="button" onClick={() => onEdit(owner)}>Edit</button></td>}
-            </tr>
+            (() => {
+              const summary = summaries.find(
+                (item) => stringValue(item.owner.id, "") === stringValue(owner.id, ""),
+              );
+              const paymentStatus = summary?.paymentStatus ?? "NO_PROPERTIES";
+              return (
+                <tr key={stringValue(owner.id)}>
+                  <td><div className="landlord-record-main"><b>{stringValue(owner.name)}</b></div></td>
+                  <td><div className="landlord-record-details">
+                    {typeof owner.email === "string" && <small>{owner.email}</small>}
+                    {typeof owner.phone === "string" && <small>{owner.phone}</small>}
+                    {typeof owner.email !== "string" && typeof owner.phone !== "string" && <small>Contact details not added</small>}
+                  </div></td>
+                  <td>{summary?.properties.length ?? 0}</td>
+                  <td>
+                    {summary ? `${summary.occupied} / ${summary.units}` : "0 / 0"}
+                    {summary && summary.units > 0 && (
+                      <small className="client-occupancy-percent">
+                        {Math.round((summary.occupied / summary.units) * 100)}%
+                      </small>
+                    )}
+                  </td>
+                  <td>
+                    <span className={`property-ledger-rent-status is-${paymentStatus.toLowerCase().replaceAll("_", "-")}`}>
+                      {paymentLabels[paymentStatus]}
+                    </span>
+                  </td>
+                  <td>{formatAmount(summary?.outstanding ?? BigInt(0), currency)}</td>
+                  <td className="client-action-cell">
+                    <button className="landlord-text-action" type="button" onClick={() => onManage(owner)}>
+                      Manage properties
+                    </button>
+                    {onEdit && (
+                      <button className="landlord-text-action" type="button" onClick={() => onEdit(owner)}>
+                        Edit
+                      </button>
+                    )}
+                  </td>
+                </tr>
+              );
+            })()
           ))}
         </tbody>
       </table>
+      {rows.length === 0 && (
+        <p className="landlord-empty-state">No clients have been added yet. Add a client and link their properties to start managing their portfolio.</p>
+      )}
     </div>
+  );
+}
+
+function ClientPropertiesOverview({
+  summary,
+  currency,
+  onManageProperty,
+}: {
+  summary: ClientPortfolioSummary;
+  currency: string;
+  onManageProperty: (propertyId: string) => void;
+}) {
+  const paymentLabels: Record<ClientPortfolioSummary["paymentStatus"], string> = {
+    UP_TO_DATE: "Up to date",
+    PAYMENT_DUE: "Balance due",
+    OVERDUE: "Overdue",
+    NOT_CHARGED: "Not charged",
+    NO_ACTIVE_TENANTS: "No active rent",
+    NO_PROPERTIES: "No properties",
+  };
+  const occupancyPercent = summary.units
+    ? Math.round((summary.occupied / summary.units) * 100)
+    : 0;
+  return (
+    <section className="client-properties-dashboard" aria-labelledby="client-properties-title">
+      <header className="client-properties-heading">
+        <div>
+          <span className="dashboard-date">CLIENT PORTFOLIO</span>
+          <h2 id="client-properties-title">{stringValue(summary.owner.name)}</h2>
+          <p>
+            {stringValue(summary.owner.email, "No email address")}
+            {typeof summary.owner.phone === "string" ? ` · ${summary.owner.phone}` : ""}
+          </p>
+        </div>
+      </header>
+      <div className="client-portfolio-summary-grid">
+        <article><small>Properties</small><strong>{summary.properties.length}</strong></article>
+        <article><small>Occupancy</small><strong>{summary.occupied} / {summary.units} units · {occupancyPercent}%</strong></article>
+        <article>
+          <small>Current payment status</small>
+          <strong>{paymentLabels[summary.paymentStatus]}</strong>
+        </article>
+        <article><small>Current balance due</small><strong>{formatAmount(summary.outstanding, currency)}</strong></article>
+      </div>
+      <div className="landlord-record-table-wrap">
+        <table className="landlord-record-table">
+          <thead>
+            <tr>
+              <th scope="col">Property</th>
+              <th scope="col">Occupancy</th>
+              <th scope="col">Payment status</th>
+              <th scope="col">Current balance</th>
+              <th scope="col"><span className="visually-hidden">Actions</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            {summary.properties.map((row) => {
+              const paymentStatus: ClientPortfolioSummary["paymentStatus"] = row.rentStatus === "OVERDUE"
+                ? "OVERDUE"
+                : row.outstanding > BigInt(0)
+                  ? "PAYMENT_DUE"
+                  : row.rentStatus === "NOT_CHARGED"
+                    ? "NOT_CHARGED"
+                    : row.rentStatus === "NO_TENANTS"
+                      ? "NO_ACTIVE_TENANTS"
+                      : "UP_TO_DATE";
+              const propertyPaymentLabel = paymentLabels[paymentStatus];
+              return (
+                <tr key={row.propertyId}>
+                  <td>
+                    <div className="landlord-record-main">
+                      <b>{stringValue(row.property.name)}</b>
+                      <small>{stringValue(row.property.address, "Address not added")}</small>
+                    </div>
+                  </td>
+                  <td>
+                    {row.occupied} / {row.units} units
+                    {row.units > 0 && (
+                      <small className="client-occupancy-percent">{row.occupancy}% occupied</small>
+                    )}
+                  </td>
+                  <td>
+                    <span className={`property-ledger-rent-status is-${paymentStatus.toLowerCase().replaceAll("_", "-")}`}>
+                      {propertyPaymentLabel}
+                    </span>
+                  </td>
+                  <td>{formatAmount(row.outstanding, currency)}</td>
+                  <td>
+                    <button
+                      className="landlord-text-action"
+                      type="button"
+                      onClick={() => onManageProperty(row.propertyId)}
+                    >
+                      Manage property
+                    </button>
+                  </td>
+                </tr>
+              );
+            })}
+            {summary.properties.length === 0 && (
+              <tr><td colSpan={5}>No properties are linked to this client yet.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </section>
   );
 }
 
@@ -7033,6 +7859,7 @@ function RecordList({
   canRemoveTeamMember,
   onLeaseStatus,
   onResendLease,
+  onSignedAgreement,
   tenantMode,
   onMoveOut,
   onAssignUnit,
@@ -7053,6 +7880,7 @@ function RecordList({
   canRemoveTeamMember?: (row: ValueRecord) => boolean;
   onLeaseStatus?: (row: ValueRecord, status: string) => void;
   onResendLease?: (row: ValueRecord) => void;
+  onSignedAgreement?: (row: ValueRecord) => void;
   tenantMode?: "tenants" | "tenancies";
   onMoveOut?: (row: ValueRecord) => void;
   onAssignUnit?: (row: ValueRecord) => void;
@@ -7098,7 +7926,7 @@ function RecordList({
     || section === "Utilities";
   const showOccupancy = section === "Tenants" && tenantMode === "tenants";
   const showTenancyLocation = section === "Tenants" && tenantMode === "tenancies";
-  const showActions = Boolean(onEdit || onRemove || onReverse || onReceipt || onLeaseStatus || onMoveOut || onAssignUnit || onArchive || onDownload);
+  const showActions = Boolean(onEdit || onRemove || onReverse || onReceipt || onLeaseStatus || onResendLease || onSignedAgreement || onMoveOut || onAssignUnit || onArchive || onDownload);
   const isPropertyDirectory = section === "Properties";
   const isTenantDirectory = showOccupancy;
   const isTenancyDirectory = showTenancyLocation;
@@ -7768,15 +8596,26 @@ function RecordList({
                 >
                   <option value="">Update lease</option>
                   {status === "DRAFT" && <option value="ACTIVE">Activate (signed)</option>}
-                  {status === "DRAFT" && <option value="TERMINATED">Terminate</option>}
                   {status === "ACTIVE" && <option value="EXPIRED">Mark expired</option>}
-                  {status === "ACTIVE" && <option value="TERMINATED">Terminate</option>}
                 </select>
               )}
               {section === "Leases" && onResendLease &&
                 ["PENDING_TENANT_REVIEW", "CHANGES_REQUESTED"].includes(status) && (
                   <button className="landlord-text-action" type="button" onClick={() => onResendLease(row)}>
                     Edit &amp; resend
+                  </button>
+                )}
+              {section === "Leases" && onSignedAgreement &&
+                nested(row, "tenantLeaseOnboarding", "responseAction") === "ACCEPTED" &&
+                typeof nested(row, "tenantLeaseOnboarding", "responseAt") === "string" && (
+                  <button
+                    className="landlord-icon-button"
+                    type="button"
+                    aria-label="Download signed lease agreement"
+                    title="Download signed lease agreement"
+                    onClick={() => onSignedAgreement(row)}
+                  >
+                    <ArrowDownToLine size={15} />
                   </button>
                 )}
               {(section === "Leases" || section === "Inspections") && onDownload && (

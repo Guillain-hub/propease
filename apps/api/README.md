@@ -6,11 +6,12 @@ background work.
 
 ## Local development
 
-For local development on Windows, start the Memurai service and PostgreSQL.
-Memurai should listen on `127.0.0.1:6379`. From the repository root:
+For local development on Windows, start PostgreSQL and Redis. Docker Compose
+can provide both services; alternatively, use PostgreSQL and a local Memurai
+service listening on `127.0.0.1:6379`. From the repository root:
 
 ```powershell
-docker compose up -d postgres
+docker compose up -d postgres redis
 Copy-Item apps/api/.env.example apps/api/.env
 ```
 
